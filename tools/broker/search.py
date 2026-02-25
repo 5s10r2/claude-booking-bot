@@ -51,7 +51,9 @@ async def _call_search_api(payload: dict) -> list:
             if inner.get("status") == 500:
                 print(f"[search] API inner error: {inner.get('message', '')} — {inner.get('data', {}).get('error', '')}")
                 return []
-            return inner.get("data", {}).get("results", [])
+            results = inner.get("data", {}).get("results", [])
+            print(f"[search] API response: status={resp.status_code}, results_count={len(results)}")
+            return results
     except Exception as e:
         print(f"[search] API error: {e}")
         return []
@@ -105,25 +107,58 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
 
     print(f"[search] payload → {payload}")
 
-    # Step 4: Search with progressive relaxation — ALWAYS return results
+    # Step 4: Search with progressive relaxation — surface MORE results
+    MIN_RESULTS_THRESHOLD = 5
+
     properties = await _call_search_api(payload)
     relaxed_note = ""
+    print(f"[search] initial query returned {len(properties)} results")
 
-    if not properties:
-        # Round 1: expand radius, double budget, drop min_budget
-        payload["radius"] = 35000
-        payload["rent_ends_to"] = max(max_budget * 2, 200000) if max_budget else 10000000
-        payload.pop("rent_starts_from", None)
-        print(f"[search] relaxation round 1 → {payload}")
-        properties = await _call_search_api(payload)
-        relaxed_note = "[RELAXED: expanded area, flexible budget] "
+    if len(properties) < MIN_RESULTS_THRESHOLD:
+        # Round 1: expand radius + triple budget, drop gender/sharing filters
+        r1_payload = {
+            "coords": [[lat, lng]],
+            "radius": 35000,
+            "rent_ends_to": max(max_budget * 3, 300000) if max_budget else 10000000,
+            "pg_ids": pg_ids,
+        }
+        if unit_types:
+            r1_payload["unit_types_available"] = unit_types
+        print(f"[search] relaxation round 1 → {r1_payload}")
+        r1_results = await _call_search_api(r1_payload)
+        print(f"[search] round 1 returned {len(r1_results)} results")
 
-    if not properties:
-        # Round 2: drop ALL filters, just coords + pg_ids + wide radius
-        payload = {"coords": [[lat, lng]], "radius": 50000, "rent_ends_to": 10000000, "pg_ids": pg_ids}
-        print(f"[search] relaxation round 2 → {payload}")
-        properties = await _call_search_api(payload)
-        relaxed_note = "[RELAXED: showing all nearby properties] "
+        if len(r1_results) > len(properties):
+            seen_ids = {p.get("p_id", p.get("prop_id")) for p in properties}
+            for p in r1_results:
+                pid = p.get("p_id", p.get("prop_id"))
+                if pid not in seen_ids:
+                    properties.append(p)
+                    seen_ids.add(pid)
+            relaxed_note = "[RELAXED: expanded area, flexible budget] "
+        print(f"[search] after round 1 merge: {len(properties)} total")
+
+    if len(properties) < MIN_RESULTS_THRESHOLD:
+        # Round 2: drop ALL filters — just coords + pg_ids + wide radius
+        r2_payload = {
+            "coords": [[lat, lng]],
+            "radius": 50000,
+            "rent_ends_to": 10000000,
+            "pg_ids": pg_ids,
+        }
+        print(f"[search] relaxation round 2 → {r2_payload}")
+        r2_results = await _call_search_api(r2_payload)
+        print(f"[search] round 2 returned {len(r2_results)} results")
+
+        if len(r2_results) > len(properties):
+            seen_ids = {p.get("p_id", p.get("prop_id")) for p in properties}
+            for p in r2_results:
+                pid = p.get("p_id", p.get("prop_id"))
+                if pid not in seen_ids:
+                    properties.append(p)
+                    seen_ids.add(pid)
+            relaxed_note = "[RELAXED: showing all nearby properties] "
+        print(f"[search] after round 2 merge: {len(properties)} total")
 
     if not properties:
         return "No properties are currently available in this region."
