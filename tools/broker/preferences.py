@@ -14,6 +14,7 @@ def save_preferences(
     sharing_types_enabled: str = None,
     amenities: str = "",
     description: str = "",
+    commute_from: str = "",
     **kwargs,
 ) -> str:
     existing = get_preferences(user_id)
@@ -40,6 +41,8 @@ def save_preferences(
         existing["amenities"] = amenities
     if description:
         existing["description"] = description
+    if commute_from:
+        existing["commute_from"] = commute_from
 
     redis_save_preferences(user_id, existing)
     return f"Preferences saved: {existing}"

@@ -24,6 +24,7 @@ async def fetch_profile_details(user_id: str, **kwargs) -> str:
         "sharing_types_enabled": "Sharing Type",
         "amenities": "Amenities",
         "description": "Description",
+        "commute_from": "Commute From",
     }
 
     for key, label in field_labels.items():

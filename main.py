@@ -12,6 +12,7 @@ Endpoints:
 
 import json
 import hashlib
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -38,6 +39,8 @@ from db.redis_store import (
     clear_no_message,
     store_vectorstore_in_redis,
     get_file_hash,
+    get_last_agent,
+    set_last_agent,
 )
 from agents import supervisor, default_agent, broker_agent, booking_agent, profile_agent, room_agent
 from channels.whatsapp import send_text, send_carousel, send_images
@@ -106,6 +109,109 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str]:
     # Step 1: Supervisor routes to agent
     agent_name = await supervisor.route(engine, messages)
 
+    # Safety net: keyword-based override if supervisor misclassifies
+    #
+    # Design: 3 layers, each more permissive:
+    #   Phase 1 — Multi-word phrases (resolve ambiguous words by context)
+    #   Phase 2 — Single words (word-boundary matching, not substring)
+    #   Phase 3 — Last-agent fallback for continuations
+    #
+    # Key insight: the same root word can mean different things:
+    #   "shortlist this property" (ACTION → broker) vs "show shortlisted" (QUERY → profile)
+    #   "schedule a visit" (ACTION → booking) vs "my visits" (QUERY → profile)
+    # Phrases in Phase 1 disambiguate; Phase 2 handles the unambiguous remainder.
+
+    msg_lower = message.lower()
+    if agent_name == "default":
+        # Normalize: strip punctuation so word matching works on "PG!" → "pg"
+        msg_clean = re.sub(r"[^\w\s-]", " ", msg_lower)
+        words = set(msg_clean.split())
+
+        # --- Phase 1: Multi-word phrases (highest confidence) ---
+        # These resolve words that are ambiguous at the single-word level.
+        profile_phrases = [
+            "my visit", "my visits", "my booking", "my bookings",
+            "my schedule", "my event", "my events",
+            "my preference", "my preferences", "my profile",
+            "shortlisted propert", "saved propert",
+            "booking status", "visit status", "scheduled event",
+        ]
+        broker_phrases = [
+            "more about", "tell me about",
+            "details of", "details about", "details for",
+            "images of", "photos of", "pictures of",
+            "far from", "distance from", "distance to",
+            "shortlist this", "shortlist the",
+        ]
+        # (No booking phrases needed — booking actions are unambiguous
+        #  at the single-word level: "cancel", "reschedule", "kyc", etc.)
+
+        if any(p in msg_lower for p in profile_phrases):
+            agent_name = "profile"
+        elif any(p in msg_lower for p in broker_phrases):
+            agent_name = "broker"
+        else:
+            # --- Phase 2: Single-word matching (word boundary, not substring) ---
+            # Profile: informational/query words — "show me my X"
+            # Note: plurals ("visits", "bookings") imply listing = profile
+            profile_words = {
+                "profile", "preference", "preferences", "upcoming",
+                "events", "visits", "bookings", "shortlisted",
+            }
+            # Booking: action words — "do X"
+            booking_words = {
+                "visit", "schedule", "book", "appointment", "call", "video",
+                "tour", "payment", "pay", "token", "kyc", "aadhaar", "otp",
+                "reserve", "cancel", "reschedule",
+            }
+            # Broker: property exploration (broadest — checked last)
+            broker_words = {
+                "find", "search", "looking", "property", "properties",
+                "pg", "flat", "apartment", "hostel", "coliving", "co-living",
+                "room", "rent", "budget", "area", "location", "available",
+                "recommend", "suggest", "bhk", "1bhk", "2bhk", "rk",
+                "single", "double", "girls", "boys", "sharing",
+                "place", "stay", "accommodation", "housing", "near", "nearby",
+                "shortlist", "details", "images", "photos",
+                "landmark", "landmarks", "distance", "far",
+                # Hindi/Hinglish
+                "kamra", "kiraya", "ghar", "chahiye", "dikhao", "jagah", "rehne",
+            }
+
+            if words & profile_words:
+                agent_name = "profile"
+            elif words & booking_words:
+                agent_name = "booking"
+            elif words & broker_words:
+                agent_name = "broker"
+
+    # --- Phase 3: Last-agent fallback for continuations ---
+    # Catches affirmatives ("yes", "ok", "haan") and very short follow-ups
+    # (≤5 words) that don't contain question/greeting words.
+    # Longer follow-ups should be caught by the improved phrase/keyword
+    # matching in Phases 1-2 instead.
+    if agent_name == "default":
+        last = get_last_agent(user_id)
+        if last and last != "default":
+            affirmatives = {
+                "yes", "ok", "okay", "sure", "go ahead", "please",
+                "yeah", "yep", "yup", "haan", "ha", "theek hai",
+                "kar do", "ho jayega", "confirm", "done", "proceed",
+            }
+            # Words that signal a NEW intent (not a continuation)
+            new_intent_words = {
+                "hello", "hi", "hey", "howdy", "namaste",
+                "thanks", "thank", "bye", "goodbye",
+                "what", "who", "where", "when", "how", "why", "which",
+            }
+            msg_stripped = msg_lower.strip().rstrip(".!,?")
+            is_new_intent = bool(words & new_intent_words)
+            if msg_stripped in affirmatives or (len(message.split()) <= 5 and not is_new_intent):
+                agent_name = last
+                print(f"[pipeline] last_agent fallback → {last}")
+
+    print(f"[pipeline] user={user_id} agent={agent_name} msg={message[:60]}")
+
     # Step 2: Run selected agent
     agent_map = {
         "default": default_agent.run,
@@ -116,6 +222,9 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str]:
 
     agent_fn = agent_map.get(agent_name, default_agent.run)
     response = await agent_fn(engine, messages, user_id)
+
+    # Track last active agent for multi-turn continuations
+    set_last_agent(user_id, agent_name)
 
     # Save assistant response to history
     conversation.add_assistant_message(user_id, response)
@@ -141,6 +250,10 @@ async def chat(req: ChatRequest):
     # Set account values if provided
     if req.account_values:
         set_account_values(req.user_id, req.account_values)
+        # Store pg_ids separately (tools read from {user_id}:pg_ids)
+        pg_ids = req.account_values.get("pg_ids", [])
+        if pg_ids:
+            set_whitelabel_pg_ids(req.user_id, pg_ids)
 
     response, agent_name = await run_pipeline(req.user_id, req.message)
 

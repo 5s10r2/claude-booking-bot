@@ -7,7 +7,43 @@ from db.redis_store import (
     set_property_info_map,
     save_property_template,
     get_whitelabel_pg_ids,
+    save_preferences as redis_save_preferences,
 )
+
+
+async def _geocode_location(location: str) -> tuple:
+    """Convert a location string to lat/long using Rentok's geocoding API."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{settings.RENTOK_API_BASE_URL}/property/getLatLongProperty",
+                json={"address": location},
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", {}).get("data", {})
+            lat = data.get("lat")
+            lng = data.get("lng")
+            if lat and lng:
+                return float(lat), float(lng)
+    except Exception as e:
+        print(f"[geocode] error for '{location}': {e}")
+    return None, None
+
+
+async def _call_search_api(payload: dict) -> list:
+    """Call Rentok search API and return raw properties list."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{settings.RENTOK_API_BASE_URL}/property/getPropertyDetailsAroundLatLong",
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("data", {}).get("data", {}).get("results", [])
+    except Exception as e:
+        print(f"[search] API error: {e}")
+        return []
 
 
 async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -> str:
@@ -28,79 +64,123 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     if radius_flag:
         radius = min(radius + 5000, 35000)
         prefs["radius"] = radius
-        from db.redis_store import save_preferences
-        save_preferences(user_id, prefs)
+        redis_save_preferences(user_id, prefs)
 
+    # Step 1: Geocode location to lat/long
+    lat, lng = await _geocode_location(location)
+    if lat is None or lng is None:
+        return f"Could not find coordinates for '{location}'. Please try a more specific area or city name."
+
+    print(f"[search] geocoded '{location}' → lat={lat}, lng={lng}")
+
+    # Step 2: Get PG IDs
     pg_ids = get_whitelabel_pg_ids(user_id)
 
+    # Step 3: Build payload matching the original API format
     payload = {
-        "location": location,
-        "min_budget": min_budget,
-        "max_budget": max_budget,
+        "coords": [[lat, lng]],
         "radius": radius,
-        "amenities": amenities,
+        "rent_ends_to": max_budget if max_budget else 10000000,
         "pg_ids": pg_ids,
     }
-    if property_type:
-        payload["property_type"] = property_type
+    if min_budget:
+        payload["rent_starts_from"] = min_budget
     if unit_types:
         payload["unit_types_available"] = unit_types
-    if pg_available_for:
+    if pg_available_for and pg_available_for in ["All Boys", "All Girls"]:
         payload["pg_available_for"] = pg_available_for
     if sharing_types:
-        payload["sharing_types_enabled"] = sharing_types
+        payload["sharing_type_enabled"] = sharing_types
 
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{settings.RENTOK_API_BASE_URL}/bookingBot/save-property-recommendations",
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as e:
-        return f"Error searching properties: {str(e)}"
+    print(f"[search] payload → {payload}")
 
-    properties = data.get("properties", data.get("data", []))
+    # Step 4: Search with progressive relaxation — ALWAYS return results
+    properties = await _call_search_api(payload)
+    relaxed_note = ""
+
     if not properties:
-        return "No properties found matching your criteria. Would you like to expand the search radius or update your preferences?"
+        # Round 1: expand radius, double budget, drop min_budget
+        payload["radius"] = 35000
+        payload["rent_ends_to"] = max(max_budget * 2, 200000) if max_budget else 10000000
+        payload.pop("rent_starts_from", None)
+        print(f"[search] relaxation round 1 → {payload}")
+        properties = await _call_search_api(payload)
+        relaxed_note = "[RELAXED: expanded area, flexible budget] "
+
+    if not properties:
+        # Round 2: drop ALL filters, just coords + pg_ids + wide radius
+        payload = {"coords": [[lat, lng]], "radius": 50000, "rent_ends_to": 10000000, "pg_ids": pg_ids}
+        print(f"[search] relaxation round 2 → {payload}")
+        properties = await _call_search_api(payload)
+        relaxed_note = "[RELAXED: showing all nearby properties] "
+
+    if not properties:
+        return "No properties are currently available in this region."
+
+    print(f"[search] found {len(properties)} properties")
 
     existing_map = get_property_info_map(user_id)
     property_template = []
 
     results = []
     for p in properties[:20]:
+        property_name = p.get("p_pg_name", p.get("property_name", "Property"))
+        address = ", ".join(filter(None, [
+            p.get("p_address_line_1", ""),
+            p.get("p_address_line_2", ""),
+            p.get("p_city", ""),
+        ]))
+        rent = p.get("p_rent_starts_from", p.get("rent", ""))
+        available_for = p.get("p_pg_available_for", "Any")
+        prop_type = p.get("p_property_type", "")
+        prop_id = p.get("p_id", p.get("prop_id", ""))
+        pg_id = p.get("p_pg_id", "")
+        pg_number = p.get("p_pg_number", "")
+        eazypg_id = p.get("p_eazypg_id", "")
+        image = p.get("p_image", p.get("image", ""))
+        distance = p.get("p_distance", p.get("distance", ""))
+        lat_val = p.get("p_latitude", p.get("latitude", ""))
+        long_val = p.get("p_longitude", p.get("longitude", ""))
+        phone = p.get("p_phone_number", "")
+        min_token = p.get("p_min_token_amount", 1000)
+        microsite_url = p.get("p_microsite_url", p.get("microsite_url", ""))
+        match_score = p.get("p_match_score", p.get("match_score", ""))
+        sharing_types_data = p.get("p_sharing_types_enabled", [])
+
         info = {
-            "property_name": p.get("property_name", p.get("name", "")),
-            "property_location": p.get("location", p.get("address", "")),
-            "property_rent": str(p.get("rent", p.get("rent_starts_from", ""))),
-            "pg_available_for": p.get("pg_available_for", "Any"),
-            "property_type": p.get("property_type", ""),
-            "property_image": p.get("image", p.get("property_image", "")),
-            "prop_id": p.get("prop_id", p.get("property_id", "")),
-            "pg_id": p.get("pg_id", ""),
-            "pg_number": p.get("pg_number", ""),
-            "eazypg_id": p.get("eazypg_id", ""),
-            "property_link": p.get("property_link", p.get("microsite_url", "")),
-            "google_map": p.get("google_map", ""),
-            "match_score": p.get("match_score", p.get("score", "")),
-            "distance": p.get("distance", ""),
-            "property_lat": p.get("latitude", p.get("lat", "")),
-            "property_long": p.get("longitude", p.get("long", "")),
-            "phone_number": p.get("phone_number", ""),
-            "min_token_amount": p.get("min_token_amount", 1000),
+            "property_name": property_name,
+            "property_location": address,
+            "property_rent": str(rent),
+            "pg_available_for": available_for,
+            "property_type": prop_type,
+            "property_image": image,
+            "prop_id": prop_id,
+            "property_id": prop_id,                    # alias for booking tools
+            "pg_id": pg_id,
+            "pg_number": pg_number,
+            "eazypg_id": eazypg_id,
+            "property_link": microsite_url,
+            "google_map": f"https://www.google.com/maps?q={lat_val},{long_val}" if lat_val and long_val else "",
+            "match_score": match_score,
+            "distance": distance,
+            "property_lat": lat_val,
+            "property_long": long_val,
+            "phone_number": phone,
+            "min_token_amount": min_token,
+            "property_min_token_amount": min_token,    # alias for payment tool
+            "sharing_types": sharing_types_data,
         }
         existing_map.append(info)
         property_template.append(info)
 
         results.append(
-            f"- {info['property_name']} | {info['property_location']} | "
-            f"Rent: {info['property_rent']} | For: {info['pg_available_for']} | "
-            f"Match: {info['match_score']} | Distance: {info['distance']} | "
-            f"Link: {info['property_link']}"
+            f"- {property_name} | {address} | "
+            f"Rent starts from: {rent} | For: {available_for} | "
+            f"Match: {match_score} | Distance: {distance} | "
+            f"Image: {image} | Link: {microsite_url}"
         )
 
     set_property_info_map(user_id, existing_map)
     save_property_template(user_id, property_template[:5])
 
-    return f"Found {len(properties)} properties. Here are the results:\n" + "\n".join(results)
+    return f"{relaxed_note}Found {len(properties)} properties. Here are the results:\n" + "\n".join(results)

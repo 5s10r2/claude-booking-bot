@@ -92,6 +92,7 @@ SCHEMAS = {
                 "sharing_types_enabled": {"type": "string", "description": "Room sharing count: 1 for single, 2 for double, etc."},
                 "amenities": {"type": "string", "description": "Comma-separated amenities: gym, wifi, parking, kitchen, etc."},
                 "description": {"type": "string", "description": "User's free-text description of what they want"},
+                "commute_from": {"type": "string", "description": "User's commute reference point — office, college, or any landmark they want properties near. E.g. 'Reliance Corporate Park, Navi Mumbai'"},
             },
             "required": ["location"],
         },

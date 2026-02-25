@@ -6,12 +6,14 @@ class Settings(BaseSettings):
     # Anthropic
     ANTHROPIC_API_KEY: str
 
-    # Redis
+    # Redis — prefer URL (Render provides this), fallback to host/port
+    REDIS_URL: Optional[str] = None
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: Optional[str] = None
 
-    # PostgreSQL
+    # PostgreSQL — prefer URL (Render provides this), fallback to individual params
+    DATABASE_URL: Optional[str] = None
     DB_HOST: str = "localhost"
     DB_NAME: str = "booking_bot"
     DB_USER: str = "postgres"
@@ -27,14 +29,14 @@ class Settings(BaseSettings):
 
     # Models
     HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
-    SONNET_MODEL: str = "claude-sonnet-4-6-20250116"
+    SONNET_MODEL: str = "claude-sonnet-4-6"
 
     # Agent settings
     MAX_AGENT_ITERATIONS: int = 15
     CONVERSATION_HISTORY_LIMIT: int = 20
     CONVERSATION_TTL_SECONDS: int = 86400  # 24 hours
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = {"env_file": ".env", "extra": "ignore", "env_ignore_empty": True}
 
 
 settings = Settings()

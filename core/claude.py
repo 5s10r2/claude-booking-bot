@@ -44,6 +44,8 @@ class AnthropicEngine:
             if response is None:
                 return "I'm experiencing a temporary issue. Please try again."
 
+            print(f"[agent] iteration {iteration + 1}/{max_iterations} | stop_reason: {response.stop_reason}")
+
             if response.stop_reason == "end_turn":
                 return self._extract_text(response)
 
@@ -56,9 +58,11 @@ class AnthropicEngine:
                 tool_results = []
                 for block in response.content:
                     if block.type == "tool_use":
+                        print(f"[tool] calling: {block.name} | input: {block.input}")
                         result = await self.tool_executor.execute(
                             block.name, block.input, user_id
                         )
+                        print(f"[tool] result: {block.name} → {str(result)[:300]}")
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,
@@ -98,7 +102,9 @@ class AnthropicEngine:
                 text = self._extract_text(response)
                 if text:
                     import json
-                    return json.loads(text)
+                    cleaned = self._clean_json(text)
+                    print(f"[classify] raw={repr(text[:80])} → cleaned={repr(cleaned)}")
+                    return json.loads(cleaned)
             except Exception as e:
                 print(f"[claude] classify attempt {attempt + 1} failed: {e}")
                 time.sleep(0.5)
@@ -141,6 +147,21 @@ class AnthropicEngine:
             if block.type == "text":
                 parts.append(block.text)
         return "\n".join(parts)
+
+    @staticmethod
+    def _clean_json(text: str) -> str:
+        """Extract JSON from text that may have markdown fences or extra text."""
+        import re
+        # Strip markdown code fences (```json ... ``` or ``` ... ```)
+        text = re.sub(r"```(?:json)?\s*", "", text)
+        text = re.sub(r"```", "", text)
+        text = text.strip()
+        # If still not starting with {, find the first JSON object
+        if not text.startswith("{"):
+            match = re.search(r"\{[^{}]*\}", text)
+            if match:
+                text = match.group(0)
+        return text
 
     @staticmethod
     def _serialize_content(content) -> list[dict]:

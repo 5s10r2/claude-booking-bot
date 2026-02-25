@@ -38,6 +38,16 @@ async def fetch_property_details(user_id: str, property_name: str, **kwargs) -> 
     pd = data.get("property_data", data.get("data", {}))
     rooms = data.get("property_rooms", data.get("rooms", []))
 
+    # Fallback if API returned no meaningful data
+    if not pd or not any(pd.get(k) for k in ("property_name", "location", "address", "rent_starts_from", "amenities")):
+        return (
+            f"Detailed info for '{prop.get('property_name', property_name)}' is currently unavailable. "
+            f"Here's what we know: Location: {prop.get('property_location', 'N/A')}, "
+            f"Rent starts from: {prop.get('property_rent', 'N/A')}, "
+            f"Type: {prop.get('property_type', 'N/A')}. "
+            f"Link: {prop.get('property_link', 'N/A')}"
+        )
+
     details = {
         "property_name": pd.get("property_name", prop.get("property_name", "")),
         "location": pd.get("location", pd.get("address", "")),

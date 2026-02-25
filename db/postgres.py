@@ -10,15 +10,28 @@ _pool: Optional[asyncpg.Pool] = None
 
 async def init_pool() -> None:
     global _pool
-    _pool = await asyncpg.create_pool(
-        host=settings.DB_HOST,
-        port=settings.DB_PORT,
-        user=settings.DB_USER,
-        password=settings.DB_PASSWORD,
-        database=settings.DB_NAME,
-        min_size=2,
-        max_size=10,
-    )
+    try:
+        if settings.DATABASE_URL:
+            # Render / managed Postgres provides a URL
+            _pool = await asyncpg.create_pool(
+                dsn=settings.DATABASE_URL,
+                min_size=2,
+                max_size=10,
+            )
+        else:
+            _pool = await asyncpg.create_pool(
+                host=settings.DB_HOST,
+                port=settings.DB_PORT,
+                user=settings.DB_USER,
+                password=settings.DB_PASSWORD,
+                database=settings.DB_NAME,
+                min_size=2,
+                max_size=10,
+            )
+        print("[postgres] Connection pool created")
+    except Exception as e:
+        print(f"[postgres] Could not connect (non-critical, continuing without DB): {e}")
+        _pool = None
 
 
 async def close_pool() -> None:

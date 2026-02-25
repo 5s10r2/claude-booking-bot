@@ -8,12 +8,18 @@ import redis
 
 from config import settings
 
-_pool = redis.ConnectionPool(
-    host=settings.REDIS_HOST,
-    port=settings.REDIS_PORT,
-    password=settings.REDIS_PASSWORD,
-    decode_responses=False,
-)
+# Prefer REDIS_URL (Render / managed Redis), fallback to host/port/password
+if settings.REDIS_URL:
+    _pool = redis.ConnectionPool.from_url(
+        settings.REDIS_URL, decode_responses=False
+    )
+else:
+    _pool = redis.ConnectionPool(
+        host=settings.REDIS_HOST,
+        port=settings.REDIS_PORT,
+        password=settings.REDIS_PASSWORD,
+        decode_responses=False,
+    )
 
 
 def _r() -> redis.Redis:
@@ -166,6 +172,19 @@ def get_active_request(user_id: str) -> Optional[str]:
 
 def delete_active_request(user_id: str) -> None:
     _r().delete(f"{user_id}:active_request")
+
+
+# ---------------------------------------------------------------------------
+# Last active agent tracking (10-min TTL for multi-turn continuations)
+# ---------------------------------------------------------------------------
+
+def set_last_agent(user_id: str, agent_name: str, ttl: int = 600) -> None:
+    _r().set(f"{user_id}:last_agent", agent_name, ex=ttl)
+
+
+def get_last_agent(user_id: str) -> Optional[str]:
+    raw = _r().get(f"{user_id}:last_agent")
+    return raw.decode() if raw else None
 
 
 # ---------------------------------------------------------------------------
