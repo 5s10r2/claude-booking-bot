@@ -32,6 +32,12 @@ async def _geocode_location(location: str) -> tuple:
 
 async def _call_search_api(payload: dict) -> list:
     """Call Rentok search API and return raw properties list."""
+    # Rentok API requires pg_ids to be a non-empty array.
+    # Empty [] causes SQL syntax error; missing key causes null reference.
+    if not payload.get("pg_ids"):
+        print("[search] WARNING: pg_ids is empty — API will return no results. "
+              "Ensure account_values.pg_ids is configured.")
+        return []
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
@@ -40,7 +46,12 @@ async def _call_search_api(payload: dict) -> list:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data.get("data", {}).get("data", {}).get("results", [])
+            # Check for inner error (API returns 200 but data.status may be 500)
+            inner = data.get("data", {})
+            if inner.get("status") == 500:
+                print(f"[search] API inner error: {inner.get('message', '')} — {inner.get('data', {}).get('error', '')}")
+                return []
+            return inner.get("data", {}).get("results", [])
     except Exception as e:
         print(f"[search] API error: {e}")
         return []

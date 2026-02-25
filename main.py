@@ -258,6 +258,7 @@ async def chat(req: ChatRequest):
     response, agent_name = await run_pipeline(req.user_id, req.message)
 
     # Persist to Postgres
+    pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
     await pg.insert_message(
         thread_id=req.user_id,
         user_phone=req.user_id,
@@ -265,7 +266,7 @@ async def chat(req: ChatRequest):
         message_sent_by=1,
         platform_type="api",
         is_template=False,
-        pg_ids="",
+        pg_ids=pg_ids_list,
     )
     await pg.insert_message(
         thread_id=req.user_id,
@@ -274,7 +275,7 @@ async def chat(req: ChatRequest):
         message_sent_by=2,
         platform_type="api",
         is_template=False,
-        pg_ids="",
+        pg_ids=pg_ids_list,
     )
 
     return ChatResponse(response=response, agent=agent_name)
