@@ -20,8 +20,8 @@ jobs:
           BODY=$(echo "$RESPONSE" | head -1)
           echo "Status: $HTTP_STATUS"
           echo "Response: $BODY"
-          if [ "$HTTP_STATUS" != "201" ]; then
-            echo "Deploy trigger failed!"
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "Deploy trigger failed! (HTTP $HTTP_STATUS)"
             exit 1
           fi
           echo "Deploy triggered successfully!"
