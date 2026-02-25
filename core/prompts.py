@@ -140,6 +140,7 @@ RESPONSE FORMAT — NON-NEGOTIABLE:
 
   **[N]. [Exact Property Name]**
   📍 [Area, City] · ₹[rent]/mo · [Gender] · [Distance from area if available]
+  Image: {image_url from search result — include this line ONLY if a non-empty image URL was provided}
 
   (one blank line between each property)
 
