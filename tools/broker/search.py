@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 
 from config import settings
@@ -57,6 +59,50 @@ async def _call_search_api(payload: dict) -> list:
     except Exception as e:
         print(f"[search] API error: {e}")
         return []
+
+
+async def _fetch_first_image(client: httpx.AsyncClient, pg_id: str, pg_number: str) -> str:
+    """Fetch the first image URL for a property. Returns '' on any failure."""
+    if not pg_id or not pg_number:
+        return ""
+    try:
+        resp = await client.post(
+            f"{settings.RENTOK_API_BASE_URL}/bookingBot/fetchPropertyImages",
+            json={"pg_id": pg_id, "pg_number": pg_number},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        images = data.get("images", data.get("data", []))
+        if images:
+            first = images[0]
+            return first.get("url", first.get("media_id", "")) if isinstance(first, dict) else str(first)
+    except Exception:
+        pass
+    return ""
+
+
+async def _enrich_with_images(properties: list, limit: int = 5) -> None:
+    """Concurrently fetch first image for properties missing p_image. Mutates in place."""
+    targets = []
+    for i, p in enumerate(properties[:limit]):
+        if not p.get("p_image") and not p.get("image"):
+            targets.append((i, p.get("p_pg_id", ""), p.get("p_pg_number", "")))
+
+    if not targets:
+        print(f"[search] image enrichment: all {min(len(properties), limit)} have images, skipping")
+        return
+
+    print(f"[search] image enrichment: fetching images for {len(targets)} properties")
+    async with httpx.AsyncClient(timeout=8) as client:
+        tasks = [_fetch_first_image(client, pg_id, pg_num) for _, pg_id, pg_num in targets]
+        urls = await asyncio.gather(*tasks)
+
+    enriched = 0
+    for (idx, _, _), url in zip(targets, urls):
+        if url:
+            properties[idx]["p_image"] = url
+            enriched += 1
+    print(f"[search] image enrichment: {enriched}/{len(targets)} images found")
 
 
 async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -> str:
@@ -164,6 +210,9 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         return "No properties are currently available in this region."
 
     print(f"[search] found {len(properties)} properties")
+
+    # Enrich top results with images from dedicated images API
+    await _enrich_with_images(properties, limit=5)
 
     existing_map = get_property_info_map(user_id)
     property_template = []
