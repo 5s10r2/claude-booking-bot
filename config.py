@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
     SONNET_MODEL: str = "claude-sonnet-4-6"
 
+    # API auth (set in .env; if empty, auth is disabled)
+    API_KEY: Optional[str] = None
+
     # Agent settings
     MAX_AGENT_ITERATIONS: int = 15
     CONVERSATION_HISTORY_LIMIT: int = 20

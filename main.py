@@ -16,8 +16,9 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends, Security
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 
 from core.log import get_logger
 
@@ -49,6 +50,23 @@ from db.redis_store import (
 from agents import supervisor, default_agent, broker_agent, booking_agent, profile_agent, room_agent
 from channels.whatsapp import send_text, send_carousel, send_images
 from db.redis_store import get_property_template, get_property_images_id
+
+# ---------------------------------------------------------------------------
+# API key auth (optional — disabled when API_KEY is unset)
+# ---------------------------------------------------------------------------
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(api_key: str = Security(_api_key_header)):
+    """Dependency that enforces X-API-Key when settings.API_KEY is set."""
+    expected = settings.API_KEY
+    if not expected:
+        return  # auth disabled
+    if api_key != expected:
+        logger.warning("Rejected request — invalid or missing API key")
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
 
 # ---------------------------------------------------------------------------
 # Globals (initialised at startup)
@@ -245,7 +263,7 @@ async def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key)])
 async def chat(req: ChatRequest):
     """JSON API for Streamlit and other clients."""
     if not req.user_id or not req.message:
@@ -285,7 +303,7 @@ async def chat(req: ChatRequest):
     return ChatResponse(response=response, agent=agent_name)
 
 
-@app.post("/webhook/whatsapp")
+@app.post("/webhook/whatsapp", dependencies=[Depends(verify_api_key)])
 async def whatsapp_webhook(request: Request):
     """Handle incoming WhatsApp messages (Meta + Interakt webhook)."""
     try:
@@ -384,7 +402,7 @@ async def whatsapp_webhook(request: Request):
     return JSONResponse({"status": "ok", "agent": agent_name})
 
 
-@app.post("/webhook/payment")
+@app.post("/webhook/payment", dependencies=[Depends(verify_api_key)])
 async def payment_webhook(request: Request):
     """Handle payment confirmation callback from Rentok."""
     try:
@@ -413,7 +431,7 @@ async def payment_webhook(request: Request):
     return JSONResponse({"status": "ok"})
 
 
-@app.post("/knowledge-base")
+@app.post("/knowledge-base", dependencies=[Depends(verify_api_key)])
 async def upload_knowledge_base(request: Request):
     """Upload PDFs or QA pairs to create a FAISS vectorstore."""
     try:
@@ -482,7 +500,7 @@ async def upload_knowledge_base(request: Request):
     })
 
 
-@app.post("/query")
+@app.post("/query", dependencies=[Depends(verify_api_key)])
 async def query_kb(request: Request):
     """Query the knowledge base."""
     try:
