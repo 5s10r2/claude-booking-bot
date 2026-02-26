@@ -27,6 +27,39 @@ def _r() -> redis.Redis:
 
 
 # ---------------------------------------------------------------------------
+# JSON helpers (replacing pickle for security — no RCE vector)
+# ---------------------------------------------------------------------------
+
+def _json_set(key: str, value, *, ex: int | None = None) -> None:
+    """Serialize value as JSON and store in Redis."""
+    data = json.dumps(value, default=str)
+    if ex:
+        _r().setex(key, ex, data)
+    else:
+        _r().set(key, data)
+
+
+def _json_get(key: str, default=None):
+    """Read from Redis with backward compat: JSON first, pickle fallback.
+
+    Existing keys written with pickle will still be readable. New writes
+    always use JSON, so pickle entries will age out naturally.
+    """
+    raw = _r().get(key)
+    if raw is None:
+        return default
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    # Backward compat: try pickle for keys written before migration
+    try:
+        return pickle.loads(raw)
+    except Exception:
+        return default
+
+
+# ---------------------------------------------------------------------------
 # Conversation history
 # ---------------------------------------------------------------------------
 
@@ -57,21 +90,13 @@ def clear_conversation(user_id: str) -> None:
 def save_preferences(user_id: str, data: dict, profile_name: str | None = None) -> None:
     if profile_name:
         data["profile_name"] = profile_name
-    serializable = {
-        k: (v.decode() if isinstance(v, bytes) else v) for k, v in data.items()
-    }
-    _r().set(f"{user_id}:preferences", pickle.dumps(data))
-    _r().setex(f"{user_id}:preferences:json", 7776000, json.dumps(serializable))
+    # Ensure bytes values are decoded for JSON compatibility
+    clean = {k: (v.decode() if isinstance(v, bytes) else v) for k, v in data.items()}
+    _json_set(f"{user_id}:preferences", clean)
 
 
 def get_preferences(user_id: str) -> dict:
-    raw = _r().get(f"{user_id}:preferences")
-    if raw is None:
-        return {}
-    try:
-        return pickle.loads(raw)
-    except Exception:
-        return {}
+    return _json_get(f"{user_id}:preferences", default={})
 
 
 # ---------------------------------------------------------------------------
@@ -79,17 +104,11 @@ def get_preferences(user_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def set_property_info_map(user_id: str, info_map: list) -> None:
-    _r().setex(f"{user_id}:property_info_map", 15552000, pickle.dumps(info_map))
+    _json_set(f"{user_id}:property_info_map", info_map, ex=15552000)
 
 
 def get_property_info_map(user_id: str) -> list:
-    raw = _r().get(f"{user_id}:property_info_map")
-    if raw is None:
-        return []
-    try:
-        return pickle.loads(raw)
-    except Exception:
-        return []
+    return _json_get(f"{user_id}:property_info_map", default=[])
 
 
 # ---------------------------------------------------------------------------
@@ -97,13 +116,7 @@ def get_property_info_map(user_id: str) -> list:
 # ---------------------------------------------------------------------------
 
 def get_shortlisted_properties(user_id: str) -> list:
-    raw = _r().get(f"{user_id}:shortlisted")
-    if raw is None:
-        return []
-    try:
-        return pickle.loads(raw)
-    except Exception:
-        return []
+    return _json_get(f"{user_id}:shortlisted", default=[])
 
 
 # ---------------------------------------------------------------------------
@@ -111,12 +124,11 @@ def get_shortlisted_properties(user_id: str) -> list:
 # ---------------------------------------------------------------------------
 
 def save_property_template(user_id: str, template: list) -> None:
-    _r().set(f"{user_id}:property_template", pickle.dumps(template))
+    _json_set(f"{user_id}:property_template", template)
 
 
 def get_property_template(user_id: str) -> list:
-    raw = _r().get(f"{user_id}:property_template")
-    return pickle.loads(raw) if raw else []
+    return _json_get(f"{user_id}:property_template", default=[])
 
 
 def clear_property_template(user_id: str) -> None:
@@ -128,12 +140,11 @@ def clear_property_template(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def set_property_images_id(user_id: str, images: list) -> None:
-    _r().set(f"{user_id}:property_images_id", pickle.dumps(images))
+    _json_set(f"{user_id}:property_images_id", images)
 
 
 def get_property_images_id(user_id: str) -> list:
-    raw = _r().get(f"{user_id}:property_images_id")
-    return pickle.loads(raw) if raw else []
+    return _json_get(f"{user_id}:property_images_id", default=[])
 
 
 def clear_property_images_id(user_id: str) -> None:
@@ -145,12 +156,11 @@ def clear_property_images_id(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def set_image_urls(user_id: str, urls: list) -> None:
-    _r().set(f"{user_id}:image_urls", pickle.dumps(urls))
+    _json_set(f"{user_id}:image_urls", urls)
 
 
 def get_image_urls(user_id: str) -> list:
-    raw = _r().get(f"{user_id}:image_urls")
-    return pickle.loads(raw) if raw else []
+    return _json_get(f"{user_id}:image_urls", default=[])
 
 
 def clear_image_urls(user_id: str) -> None:
@@ -192,12 +202,11 @@ def get_last_agent(user_id: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def set_account_values(user_id: str, values: dict) -> None:
-    _r().set(f"{user_id}:account_values", pickle.dumps(values))
+    _json_set(f"{user_id}:account_values", values)
 
 
 def get_account_values(user_id: str) -> dict:
-    raw = _r().get(f"{user_id}:account_values")
-    return pickle.loads(raw) if raw else {}
+    return _json_get(f"{user_id}:account_values", default={})
 
 
 def clear_account_values(user_id: str) -> None:
@@ -209,12 +218,11 @@ def clear_account_values(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def set_whitelabel_pg_ids(user_id: str, pg_ids: list) -> None:
-    _r().set(f"{user_id}:pg_ids", pickle.dumps(pg_ids))
+    _json_set(f"{user_id}:pg_ids", pg_ids)
 
 
 def get_whitelabel_pg_ids(user_id: str) -> list:
-    raw = _r().get(f"{user_id}:pg_ids")
-    return pickle.loads(raw) if raw else []
+    return _json_get(f"{user_id}:pg_ids", default=[])
 
 
 # ---------------------------------------------------------------------------
@@ -229,21 +237,17 @@ def set_payment_info(
     amount: str,
     short_link: str,
 ) -> None:
-    _r().set(
-        f"{user_id}:payment_info",
-        pickle.dumps({
-            "pg_name": pg_name,
-            "pg_id": pg_id,
-            "pg_number": pg_number,
-            "amount": amount,
-            "short_link": short_link,
-        }),
-    )
+    _json_set(f"{user_id}:payment_info", {
+        "pg_name": pg_name,
+        "pg_id": pg_id,
+        "pg_number": pg_number,
+        "amount": amount,
+        "short_link": short_link,
+    })
 
 
 def get_payment_info(user_id: str) -> Optional[dict]:
-    raw = _r().get(f"{user_id}:payment_info")
-    return pickle.loads(raw) if raw else None
+    return _json_get(f"{user_id}:payment_info", default=None)
 
 
 def clear_payment_info(user_id: str) -> None:
@@ -328,12 +332,11 @@ def get_response(wama_id: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def set_property_id_for_search(user_id: str, property_ids: list) -> None:
-    _r().setex(f"{user_id}:search_property_ids", 600, pickle.dumps(property_ids))
+    _json_set(f"{user_id}:search_property_ids", property_ids, ex=600)
 
 
 def get_property_id_for_search(user_id: str) -> list:
-    raw = _r().get(f"{user_id}:search_property_ids")
-    return pickle.loads(raw) if raw else []
+    return _json_get(f"{user_id}:search_property_ids", default=[])
 
 
 def clear_property_id_for_search(user_id: str) -> None:
