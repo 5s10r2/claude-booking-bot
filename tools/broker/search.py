@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json as _json
 
 import httpx
 
@@ -10,7 +12,42 @@ from db.redis_store import (
     save_property_template,
     get_whitelabel_pg_ids,
     save_preferences as redis_save_preferences,
+    _r as _redis,
 )
+
+
+SEARCH_CACHE_TTL = 900  # 15 minutes
+
+
+def _search_cache_key(payload: dict) -> str:
+    """Deterministic cache key from search payload."""
+    # Sort keys for consistency; remove non-deterministic fields
+    stable = _json.dumps(payload, sort_keys=True, default=str)
+    return f"search_cache:{hashlib.md5(stable.encode()).hexdigest()}"
+
+
+def _get_search_cache(payload: dict) -> list | None:
+    """Return cached search results or None on miss."""
+    key = _search_cache_key(payload)
+    raw = _redis().get(key)
+    if raw is None:
+        return None
+    try:
+        data = _json.loads(raw)
+        print(f"[search] cache HIT ({key[-12:]}): {len(data)} results")
+        return data
+    except Exception:
+        return None
+
+
+def _set_search_cache(payload: dict, results: list) -> None:
+    """Store search results in Redis with TTL."""
+    key = _search_cache_key(payload)
+    try:
+        _redis().setex(key, SEARCH_CACHE_TTL, _json.dumps(results, default=str))
+        print(f"[search] cache SET ({key[-12:]}): {len(results)} results, TTL={SEARCH_CACHE_TTL}s")
+    except Exception as e:
+        print(f"[search] cache SET failed: {e}")
 
 
 async def _geocode_location(location: str) -> tuple:
@@ -33,13 +70,18 @@ async def _geocode_location(location: str) -> tuple:
 
 
 async def _call_search_api(payload: dict) -> list:
-    """Call Rentok search API and return raw properties list."""
+    """Call Rentok search API and return raw properties list. Uses Redis cache."""
     # Rentok API requires pg_ids to be a non-empty array.
-    # Empty [] causes SQL syntax error; missing key causes null reference.
     if not payload.get("pg_ids"):
         print("[search] WARNING: pg_ids is empty — API will return no results. "
               "Ensure account_values.pg_ids is configured.")
         return []
+
+    # Check cache first
+    cached = _get_search_cache(payload)
+    if cached is not None:
+        return cached
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
@@ -55,6 +97,11 @@ async def _call_search_api(payload: dict) -> list:
                 return []
             results = inner.get("data", {}).get("results", [])
             print(f"[search] API response: status={resp.status_code}, results_count={len(results)}")
+
+            # Cache successful non-empty results
+            if results:
+                _set_search_cache(payload, results)
+
             return results
     except Exception as e:
         print(f"[search] API error: {e}")
