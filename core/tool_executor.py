@@ -1,5 +1,9 @@
 from typing import Any, Callable
 
+from core.log import get_logger
+
+logger = get_logger("core.tool_executor")
+
 
 class ToolExecutor:
     def __init__(self):
@@ -21,5 +25,5 @@ class ToolExecutor:
                 result = await result
             return str(result)
         except Exception as e:
-            print(f"[tool_executor] Error executing {tool_name}: {e}")
+            logger.error("Error executing %s: %s", tool_name, e)
             return f"Error executing {tool_name}: {str(e)}"

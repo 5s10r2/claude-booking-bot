@@ -5,6 +5,9 @@ import json as _json
 import httpx
 
 from config import settings
+from core.log import get_logger
+
+logger = get_logger("tools.search")
 from db.redis_store import (
     get_preferences,
     get_property_info_map,
@@ -34,7 +37,7 @@ def _get_search_cache(payload: dict) -> list | None:
         return None
     try:
         data = _json.loads(raw)
-        print(f"[search] cache HIT ({key[-12:]}): {len(data)} results")
+        logger.info("cache HIT (%s): %d results", key[-12:], len(data))
         return data
     except Exception:
         return None
@@ -45,9 +48,9 @@ def _set_search_cache(payload: dict, results: list) -> None:
     key = _search_cache_key(payload)
     try:
         _redis().setex(key, SEARCH_CACHE_TTL, _json.dumps(results, default=str))
-        print(f"[search] cache SET ({key[-12:]}): {len(results)} results, TTL={SEARCH_CACHE_TTL}s")
+        logger.debug("cache SET (%s): %d results, TTL=%ds", key[-12:], len(results), SEARCH_CACHE_TTL)
     except Exception as e:
-        print(f"[search] cache SET failed: {e}")
+        logger.warning("cache SET failed: %s", e)
 
 
 async def _geocode_location(location: str) -> tuple:
@@ -65,7 +68,7 @@ async def _geocode_location(location: str) -> tuple:
             if lat and lng:
                 return float(lat), float(lng)
     except Exception as e:
-        print(f"[geocode] error for '{location}': {e}")
+        logger.warning("geocode error for '%s': %s", location, e)
     return None, None
 
 
@@ -73,8 +76,7 @@ async def _call_search_api(payload: dict) -> list:
     """Call Rentok search API and return raw properties list. Uses Redis cache."""
     # Rentok API requires pg_ids to be a non-empty array.
     if not payload.get("pg_ids"):
-        print("[search] WARNING: pg_ids is empty — API will return no results. "
-              "Ensure account_values.pg_ids is configured.")
+        logger.warning("pg_ids is empty — API will return no results. Ensure account_values.pg_ids is configured.")
         return []
 
     # Check cache first
@@ -93,10 +95,10 @@ async def _call_search_api(payload: dict) -> list:
             # Check for inner error (API returns 200 but data.status may be 500)
             inner = data.get("data", {})
             if inner.get("status") == 500:
-                print(f"[search] API inner error: {inner.get('message', '')} — {inner.get('data', {}).get('error', '')}")
+                logger.error("API inner error: %s — %s", inner.get("message", ""), inner.get("data", {}).get("error", ""))
                 return []
             results = inner.get("data", {}).get("results", [])
-            print(f"[search] API response: status={resp.status_code}, results_count={len(results)}")
+            logger.info("API response: status=%d, results=%d", resp.status_code, len(results))
 
             # Cache successful non-empty results
             if results:
@@ -104,7 +106,7 @@ async def _call_search_api(payload: dict) -> list:
 
             return results
     except Exception as e:
-        print(f"[search] API error: {e}")
+        logger.error("API error: %s", e)
         return []
 
 
@@ -136,10 +138,10 @@ async def _enrich_with_images(properties: list, limit: int = 5) -> None:
             targets.append((i, p.get("p_pg_id", ""), p.get("p_pg_number", "")))
 
     if not targets:
-        print(f"[search] image enrichment: all {min(len(properties), limit)} have images, skipping")
+        logger.debug("image enrichment: all %d have images, skipping", min(len(properties), limit))
         return
 
-    print(f"[search] image enrichment: fetching images for {len(targets)} properties")
+    logger.info("image enrichment: fetching images for %d properties", len(targets))
     async with httpx.AsyncClient(timeout=8) as client:
         tasks = [_fetch_first_image(client, pg_id, pg_num) for _, pg_id, pg_num in targets]
         urls = await asyncio.gather(*tasks)
@@ -149,7 +151,7 @@ async def _enrich_with_images(properties: list, limit: int = 5) -> None:
         if url:
             properties[idx]["p_image"] = url
             enriched += 1
-    print(f"[search] image enrichment: {enriched}/{len(targets)} images found")
+    logger.info("image enrichment: %d/%d images found", enriched, len(targets))
 
 
 async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -> str:
@@ -177,7 +179,7 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     if lat is None or lng is None:
         return f"Could not find coordinates for '{location}'. Please try a more specific area or city name."
 
-    print(f"[search] geocoded '{location}' → lat={lat}, lng={lng}")
+    logger.info("geocoded '%s' → lat=%s, lng=%s", location, lat, lng)
 
     # Step 2: Get PG IDs
     pg_ids = get_whitelabel_pg_ids(user_id)
@@ -198,14 +200,14 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     if sharing_types:
         payload["sharing_type_enabled"] = sharing_types
 
-    print(f"[search] payload → {payload}")
+    logger.debug("search payload: %s", payload)
 
     # Step 4: Search with progressive relaxation — surface MORE results
     MIN_RESULTS_THRESHOLD = 5
 
     properties = await _call_search_api(payload)
     relaxed_note = ""
-    print(f"[search] initial query returned {len(properties)} results")
+    logger.info("initial query returned %d results", len(properties))
 
     if len(properties) < MIN_RESULTS_THRESHOLD:
         # Round 1: expand radius + triple budget, drop gender/sharing filters
@@ -217,9 +219,9 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         }
         if unit_types:
             r1_payload["unit_types_available"] = unit_types
-        print(f"[search] relaxation round 1 → {r1_payload}")
+        logger.debug("relaxation round 1 payload: %s", r1_payload)
         r1_results = await _call_search_api(r1_payload)
-        print(f"[search] round 1 returned {len(r1_results)} results")
+        logger.info("relaxation round 1 returned %d results", len(r1_results))
 
         if len(r1_results) > len(properties):
             seen_ids = {p.get("p_id", p.get("prop_id")) for p in properties}
@@ -229,7 +231,7 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
                     properties.append(p)
                     seen_ids.add(pid)
             relaxed_note = "[RELAXED: expanded area, flexible budget] "
-        print(f"[search] after round 1 merge: {len(properties)} total")
+        logger.info("after round 1 merge: %d total", len(properties))
 
     if len(properties) < MIN_RESULTS_THRESHOLD:
         # Round 2: drop ALL filters — just coords + pg_ids + wide radius
@@ -239,9 +241,9 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
             "rent_ends_to": 10000000,
             "pg_ids": pg_ids,
         }
-        print(f"[search] relaxation round 2 → {r2_payload}")
+        logger.debug("relaxation round 2 payload: %s", r2_payload)
         r2_results = await _call_search_api(r2_payload)
-        print(f"[search] round 2 returned {len(r2_results)} results")
+        logger.info("relaxation round 2 returned %d results", len(r2_results))
 
         if len(r2_results) > len(properties):
             seen_ids = {p.get("p_id", p.get("prop_id")) for p in properties}
@@ -251,12 +253,12 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
                     properties.append(p)
                     seen_ids.add(pid)
             relaxed_note = "[RELAXED: showing all nearby properties] "
-        print(f"[search] after round 2 merge: {len(properties)} total")
+        logger.info("after round 2 merge: %d total", len(properties))
 
     if not properties:
         return "No properties are currently available in this region."
 
-    print(f"[search] found {len(properties)} properties")
+    logger.info("found %d properties", len(properties))
 
     # Enrich top results with images from dedicated images API
     await _enrich_with_images(properties, limit=5)

@@ -5,7 +5,10 @@ from typing import Optional
 import anthropic
 
 from config import settings
+from core.log import get_logger
 from core.tool_executor import ToolExecutor
+
+logger = get_logger("core.claude")
 
 
 class AnthropicEngine:
@@ -45,7 +48,7 @@ class AnthropicEngine:
             if response is None:
                 return "I'm experiencing a temporary issue. Please try again."
 
-            print(f"[agent] iteration {iteration + 1}/{max_iterations} | stop_reason: {response.stop_reason}")
+            logger.debug("iteration %d/%d | stop_reason=%s", iteration + 1, max_iterations, response.stop_reason)
 
             if response.stop_reason == "end_turn":
                 return self._extract_text(response)
@@ -60,7 +63,7 @@ class AnthropicEngine:
                 tool_blocks = [b for b in response.content if b.type == "tool_use"]
 
                 for b in tool_blocks:
-                    print(f"[tool] calling: {b.name} | input: {b.input}")
+                    logger.info("tool call: %s | input=%s", b.name, b.input)
 
                 results = await asyncio.gather(*[
                     self.tool_executor.execute(b.name, b.input, user_id)
@@ -69,7 +72,7 @@ class AnthropicEngine:
 
                 tool_results = []
                 for block, result in zip(tool_blocks, results):
-                    print(f"[tool] result: {block.name} → {str(result)[:300]}")
+                    logger.debug("tool result: %s → %s", block.name, str(result)[:300])
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -110,10 +113,10 @@ class AnthropicEngine:
                 if text:
                     import json
                     cleaned = self._clean_json(text)
-                    print(f"[classify] raw={repr(text[:80])} → cleaned={repr(cleaned)}")
+                    logger.debug("classify raw=%s → cleaned=%s", repr(text[:80]), repr(cleaned))
                     return json.loads(cleaned)
             except Exception as e:
-                print(f"[claude] classify attempt {attempt + 1} failed: {e}")
+                logger.warning("classify attempt %d failed: %s", attempt + 1, e)
                 await asyncio.sleep(0.5)
         return None
 
@@ -138,10 +141,10 @@ class AnthropicEngine:
                 return await self.client.messages.create(**kwargs)
             except anthropic.RateLimitError:
                 wait = 2 ** attempt
-                print(f"[claude] rate limited, waiting {wait}s...")
+                logger.warning("rate limited, waiting %ds", wait)
                 await asyncio.sleep(wait)
             except anthropic.APIError as e:
-                print(f"[claude] API error: {e}")
+                logger.error("API error: %s", e)
                 if attempt == max_retries - 1:
                     return None
                 await asyncio.sleep(1)

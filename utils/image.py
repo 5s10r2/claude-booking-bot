@@ -7,6 +7,10 @@ from typing import Optional
 
 import httpx
 
+from core.log import get_logger
+
+logger = get_logger("utils.image")
+
 try:
     from PIL import Image
 except ImportError:
@@ -32,7 +36,7 @@ async def convert_webp_to_jpeg(image_url: str) -> Optional[bytes]:
         buf.seek(0)
         return buf.getvalue()
     except Exception as e:
-        print(f"[image] Error converting {image_url}: {e}")
+        logger.error("Error converting %s: %s", image_url, e)
         return None
 
 
@@ -94,5 +98,5 @@ async def upload_media_from_url(
             data = resp.json()
             return data.get("id")
     except Exception as e:
-        print(f"[image] Error uploading media: {e}")
+        logger.error("Error uploading media: %s", e)
         return None

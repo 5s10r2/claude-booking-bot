@@ -18,6 +18,10 @@ from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
+
+from core.log import get_logger
+
+logger = get_logger("main")
 from pydantic import BaseModel
 
 from config import settings
@@ -67,12 +71,12 @@ async def lifespan(app: FastAPI):
     engine = AnthropicEngine(tool_executor=executor)
     conversation = ConversationManager()
 
-    print("[startup] Claude Booking Bot ready")
+    logger.info("Claude Booking Bot ready")
     yield
 
     # Shutdown
     await pg.close_pool()
-    print("[shutdown] Pools closed")
+    logger.info("Pools closed")
 
 
 app = FastAPI(title="Claude Booking Bot", lifespan=lifespan)
@@ -208,9 +212,9 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str]:
             is_new_intent = bool(words & new_intent_words)
             if msg_stripped in affirmatives or (len(message.split()) <= 5 and not is_new_intent):
                 agent_name = last
-                print(f"[pipeline] last_agent fallback → {last}")
+                logger.debug("last_agent fallback → %s", last)
 
-    print(f"[pipeline] user={user_id} agent={agent_name} msg={message[:60]}")
+    logger.info("user=%s agent=%s msg=%s", user_id, agent_name, message[:60])
 
     # Step 2: Run selected agent
     agent_map = {
@@ -353,7 +357,7 @@ async def whatsapp_webhook(request: Request):
     try:
         response, agent_name = await run_pipeline(user_phone, text)
     except Exception as e:
-        print(f"[webhook] Pipeline error for {user_phone}: {e}")
+        logger.error("Pipeline error for %s: %s", user_phone, e)
         response = "I'm sorry, I'm having trouble right now. Please try again."
         agent_name = "error"
 
@@ -442,7 +446,7 @@ async def upload_knowledge_base(request: Request):
                 if page_text:
                     texts.append(page_text)
         except Exception as e:
-            print(f"[kb] Error reading PDF: {e}")
+            logger.error("Error reading PDF: %s", e)
 
     # Process QA data
     if qa_data:

@@ -8,6 +8,10 @@ from datetime import datetime
 
 import httpx
 
+from core.log import get_logger
+
+logger = get_logger("channels.whatsapp")
+
 from db.redis_store import (
     get_account_values,
     get_whitelabel_pg_ids,
@@ -93,7 +97,7 @@ async def send_text(user_id: str, message: str) -> dict:
 
             return resp_data
     except Exception as e:
-        print(f"[whatsapp] Error sending text: {e}")
+        logger.error("Error sending text: %s", e)
         return {"error": True, "message": str(e)}
 
 
@@ -118,7 +122,7 @@ async def send_image(user_id: str, media_id: str, caption: str = "") -> dict:
             resp.raise_for_status()
             return resp.json()
     except Exception as e:
-        print(f"[whatsapp] Error sending image: {e}")
+        logger.error("Error sending image: %s", e)
         return {"error": True, "message": str(e)}
 
 
@@ -242,7 +246,7 @@ async def send_carousel(user_id: str, property_template: list) -> dict:
             resp.raise_for_status()
             result = resp.json()
     except Exception as e:
-        print(f"[whatsapp] Error sending carousel: {e}")
+        logger.error("Error sending carousel: %s", e)
         result = {"error": True, "message": str(e)}
 
     clear_image_urls(user_id)

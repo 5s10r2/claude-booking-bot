@@ -4,6 +4,9 @@ from typing import Optional
 import asyncpg
 
 from config import settings
+from core.log import get_logger
+
+logger = get_logger("db.postgres")
 
 _pool: Optional[asyncpg.Pool] = None
 
@@ -28,9 +31,9 @@ async def init_pool() -> None:
                 min_size=2,
                 max_size=10,
             )
-        print("[postgres] Connection pool created")
+        logger.info("Connection pool created")
     except Exception as e:
-        print(f"[postgres] Could not connect (non-critical, continuing without DB): {e}")
+        logger.warning("Could not connect (non-critical, continuing without DB): %s", e)
         _pool = None
 
 
@@ -74,7 +77,7 @@ async def insert_message(
         )
         return row["id"] if row else None
     except Exception as e:
-        print(f"[postgres] insert_message error: {e}")
+        logger.error("insert_message error: %s", e)
         return None
 
 
@@ -96,5 +99,5 @@ async def get_messages(thread_id: str, limit: int = 50) -> list[dict]:
         )
         return [dict(r) for r in rows]
     except Exception as e:
-        print(f"[postgres] get_messages error: {e}")
+        logger.error("get_messages error: %s", e)
         return []
