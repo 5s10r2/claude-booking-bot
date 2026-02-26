@@ -12,11 +12,12 @@ from db.redis_store import get_account_values
 from utils.date import today_date, current_day
 
 
-def get_config(user_id: str) -> dict:
+def get_config(user_id: str, language: str = "en") -> dict:
     """Return agent setup for use by both run() and streaming endpoint."""
     account = get_account_values(user_id)
     system_prompt = format_prompt(
         BOOKING_AGENT_PROMPT,
+        language=language,
         brand_name=account.get("brand_name", "our platform"),
         cities=account.get("cities", ""),
         areas=account.get("areas", ""),
@@ -38,8 +39,9 @@ async def run(
     engine: AnthropicEngine,
     messages: list[dict],
     user_id: str,
+    language: str = "en",
 ) -> str:
-    cfg = get_config(user_id)
+    cfg = get_config(user_id, language=language)
 
     original_executor = engine.tool_executor
     engine.tool_executor = cfg["executor"]

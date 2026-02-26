@@ -81,6 +81,29 @@ async def insert_message(
         return None
 
 
+async def get_message_volume(start_date: str, end_date: str) -> dict:
+    """Return daily message counts: {"2026-02-20": 42, ...}."""
+    if _pool is None:
+        return {}
+    try:
+        rows = await _pool.fetch(
+            """
+            SELECT DATE(created_at) AS day, COUNT(*) AS cnt
+            FROM booking_messages
+            WHERE created_at >= $1::date
+              AND created_at < ($2::date + INTERVAL '1 day')
+            GROUP BY DATE(created_at)
+            ORDER BY day
+            """,
+            start_date,
+            end_date,
+        )
+        return {str(r["day"]): r["cnt"] for r in rows}
+    except Exception as e:
+        logger.error("get_message_volume error: %s", e)
+        return {}
+
+
 async def get_messages(thread_id: str, limit: int = 50) -> list[dict]:
     if _pool is None:
         return []

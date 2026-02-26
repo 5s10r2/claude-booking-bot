@@ -413,6 +413,43 @@ def get_feedback_counts() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# User language preference
+# ---------------------------------------------------------------------------
+
+def set_user_language(user_id: str, lang: str) -> None:
+    """Store detected/selected language. TTL = 24h (same as conversation)."""
+    _r().set(f"{user_id}:language", lang, ex=86400)
+
+
+def get_user_language(user_id: str) -> str:
+    """Return stored language or 'en' default."""
+    raw = _r().get(f"{user_id}:language")
+    return raw.decode() if raw else "en"
+
+
+# ---------------------------------------------------------------------------
+# Agent usage tracking (analytics)
+# ---------------------------------------------------------------------------
+
+def track_agent_usage(user_id: str, agent_name: str) -> None:
+    """Increment agent usage counter for today. 90-day TTL."""
+    from datetime import date
+    day = date.today().isoformat()
+    key = f"agent_usage:{day}"
+    _r().hincrby(key, agent_name, 1)
+    _r().expire(key, 90 * 86400)
+
+
+def get_agent_usage(day: str = None) -> dict:
+    """Return {agent: count} for a given day (default: today)."""
+    if day is None:
+        from datetime import date
+        day = date.today().isoformat()
+    raw = _r().hgetall(f"agent_usage:{day}")
+    return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
+
+
+# ---------------------------------------------------------------------------
 # Funnel tracking (search → detail → shortlist → visit → booking)
 # ---------------------------------------------------------------------------
 

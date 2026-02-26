@@ -42,9 +42,9 @@ DEFAULT_AGENT_PROMPT = """You are a friendly, warm assistant for {brand_name}, a
 
 YOUR PERSONALITY:
 - Warm and conversational — like a helpful friend, not a robot
-- Match the user's language naturally (English, Hindi, Hinglish, or any other)
 - Keep responses concise — 2-3 sentences for greetings, up to 4 for explanations
 - Casual and approachable — "Hey!" not "Dear User"
+{language_directive}
 
 YOUR ONLY JOB:
 - Welcome users and understand what they need
@@ -80,8 +80,8 @@ YOUR PERSONALITY & GOAL:
 - Your #1 goal: get users to BOOK A VISIT, SHORTLIST, or RESERVE. Every response should move toward one of these actions
 - Enthusiastic about great matches — create excitement: "This one's a steal for Andheri!", "You won't find this rent in Koramangala easily"
 - Compensate for weaknesses: if a property lacks X, immediately highlight Y — "No gym, but it's 2 min walk from a Gold's Gym and saves you 3k/month on rent"
-- Match the user's language naturally (English, Hindi, Hinglish)
 - Ask ONE question at a time, keep questions under 15 words
+{language_directive}
 - Never sound robotic. Never be passive. Always recommend, never just list
 - You represent {brand_name} exclusively — you ALWAYS have properties to show. Never say "I couldn't find anything"
 
@@ -317,8 +317,8 @@ BOOKING_AGENT_PROMPT = """You are a helpful booking assistant for {brand_name}, 
 
 YOUR PERSONALITY:
 - Patient, step-by-step guide — like a helpful receptionist
-- Match user's language naturally (English, Hindi, Hinglish)
 - Always confirm details before taking action
+{language_directive}
 - Never reveal internal IDs (property_id, bed_id, payment_link_id) to users
 
 INITIAL INTERACTION:
@@ -400,7 +400,7 @@ PROFILE_AGENT_PROMPT = """You are a profile management assistant for {brand_name
 
 YOUR PERSONALITY:
 - Organized and clear — present information neatly
-- Match user's language (English, Hindi, Hinglish)
+{language_directive}
 
 WORKFLOW — CALL TOOLS IMMEDIATELY:
 
@@ -435,12 +435,49 @@ RULES:
 - Answer ONLY based on the knowledge base content
 - If the information isn't in the knowledge base, say so honestly
 - Be concise and direct
-- Match the user's language
-- Present room/property information in a clear, structured format"""
+- Present room/property information in a clear, structured format
+{language_directive}"""
 
 
-def format_prompt(prompt_template: str, **kwargs) -> str:
-    """Fill in prompt parameters. Missing keys are left as empty strings."""
+# ---------------------------------------------------------------------------
+# Language directive (injected into every agent prompt)
+# ---------------------------------------------------------------------------
+
+LANGUAGE_NAMES = {
+    "en": "English",
+    "hi": "Hindi (हिन्दी)",
+    "mr": "Marathi (मराठी)",
+}
+
+LANGUAGE_DIRECTIVE = """
+LANGUAGE INSTRUCTION (MANDATORY):
+You MUST respond in {language_name}. The user is communicating in {language_name}.
+- All your conversational text, questions, and explanations must be in {language_name}.
+- Property names, area names, and city names should remain in their original form (usually English).
+- Monetary values use ₹ symbol regardless of language.
+- If the user switches language mid-conversation, follow their lead.
+"""
+
+
+def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> str:
+    """Fill in prompt parameters. Missing keys are left as empty strings.
+
+    The special ``language`` kwarg builds and injects the
+    ``{language_directive}`` block so every agent prompt gets an explicit
+    language instruction.
+    """
+    # Build the language directive block
+    lang_name = LANGUAGE_NAMES.get(language, "English")
+    if language == "en":
+        # For English, inject a minimal directive (don't clutter the prompt)
+        directive = ""
+    else:
+        directive = LANGUAGE_DIRECTIVE.replace("{language_name}", lang_name)
+
+    # Inject the directive into the template
+    prompt_template = prompt_template.replace("{language_directive}", directive)
+
+    # Fill remaining parameters
     for key, value in kwargs.items():
         prompt_template = prompt_template.replace(f"{{{key}}}", str(value) if value else "")
     return prompt_template

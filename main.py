@@ -23,6 +23,7 @@ from fastapi.security import APIKeyHeader
 
 from core.log import get_logger
 from core.rate_limiter import check_rate_limit, RateLimitExceeded
+from core.language import detect_language
 
 logger = get_logger("main")
 from pydantic import BaseModel
@@ -53,6 +54,10 @@ from db.redis_store import (
     get_feedback_counts,
     track_funnel,
     get_funnel,
+    set_user_language,
+    get_user_language,
+    track_agent_usage,
+    get_agent_usage,
 )
 from agents import supervisor, default_agent, broker_agent, booking_agent, profile_agent, room_agent
 from channels.whatsapp import send_text, send_carousel, send_images
@@ -140,14 +145,22 @@ class ChatResponse(BaseModel):
     response: str
     agent: str = ""
     parts: list[dict] = []
+    locale: str = "en"
 
 
 # ---------------------------------------------------------------------------
 # Core pipeline
 # ---------------------------------------------------------------------------
 
-async def run_pipeline(user_id: str, message: str) -> tuple[str, str]:
-    """Run the full supervisor → agent pipeline. Returns (response, agent_name)."""
+async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
+    """Run the full supervisor → agent pipeline. Returns (response, agent_name, language)."""
+    # Detect language from message
+    detected_lang = detect_language(message)
+    stored_lang = get_user_language(user_id)
+    language = detected_lang if detected_lang != "en" else stored_lang
+    if detected_lang != "en":
+        set_user_language(user_id, detected_lang)
+
     # Load conversation history
     history = conversation.get_history(user_id)
     conversation.add_user_message(user_id, message)
@@ -225,6 +238,8 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str]:
                 "landmark", "landmarks", "distance", "far",
                 # Hindi/Hinglish
                 "kamra", "kiraya", "ghar", "chahiye", "dikhao", "jagah", "rehne",
+                # Marathi
+                "खोली", "भाडे", "जागा", "पाहिजे", "दाखवा", "शोधा", "बुकिंग",
             }
 
             if words & profile_words:
@@ -246,6 +261,8 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str]:
                 "yes", "ok", "okay", "sure", "go ahead", "please",
                 "yeah", "yep", "yup", "haan", "ha", "theek hai",
                 "kar do", "ho jayega", "confirm", "done", "proceed",
+                # Marathi
+                "हो", "चालेल", "ठीक आहे",
             }
             # Words that signal a NEW intent (not a continuation)
             new_intent_words = {
@@ -259,9 +276,12 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str]:
                 agent_name = last
                 logger.debug("last_agent fallback → %s", last)
 
-    logger.info("user=%s agent=%s msg=%s", user_id, agent_name, message[:60])
+    logger.info("user=%s agent=%s lang=%s msg=%s", user_id, agent_name, language, message[:60])
 
-    # Step 2: Run selected agent
+    # Track agent usage for analytics
+    track_agent_usage(user_id, agent_name)
+
+    # Step 2: Run selected agent (with language)
     agent_map = {
         "default": default_agent.run,
         "broker": broker_agent.run,
@@ -270,7 +290,7 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str]:
     }
 
     agent_fn = agent_map.get(agent_name, default_agent.run)
-    response = await agent_fn(engine, messages, user_id)
+    response = await agent_fn(engine, messages, user_id, language=language)
 
     # Track last active agent for multi-turn continuations
     set_last_agent(user_id, agent_name)
@@ -278,7 +298,7 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str]:
     # Save assistant response to history
     conversation.add_assistant_message(user_id, response)
 
-    return response, agent_name
+    return response, agent_name, language
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +326,7 @@ async def chat(req: ChatRequest):
         if pg_ids:
             set_whitelabel_pg_ids(req.user_id, pg_ids)
 
-    response, agent_name = await run_pipeline(req.user_id, req.message)
+    response, agent_name, language = await run_pipeline(req.user_id, req.message)
 
     # Persist to Postgres
     pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
@@ -336,19 +356,26 @@ async def chat(req: ChatRequest):
         logger.warning("parse_message_parts failed: %s", e)
         parts = [{"type": "text", "markdown": response}]
 
-    return ChatResponse(response=response, agent=agent_name, parts=parts)
+    return ChatResponse(response=response, agent=agent_name, parts=parts, locale=language)
 
 
 # ---------------------------------------------------------------------------
 # SSE streaming endpoint
 # ---------------------------------------------------------------------------
 
-async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict]]:
-    """Shared routing logic: returns (agent_name, messages).
+async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict], str]:
+    """Shared routing logic: returns (agent_name, messages, language).
 
     Applies supervisor + keyword safety net + last-agent fallback —
     identical to run_pipeline but without running the agent itself.
     """
+    # Detect language
+    detected_lang = detect_language(message)
+    stored_lang = get_user_language(user_id)
+    language = detected_lang if detected_lang != "en" else stored_lang
+    if detected_lang != "en":
+        set_user_language(user_id, detected_lang)
+
     history = conversation.get_history(user_id)
     conversation.add_user_message(user_id, message)
     messages = history + [{"role": "user", "content": message}]
@@ -400,6 +427,8 @@ async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict]]:
                 "shortlist", "details", "images", "photos",
                 "landmark", "landmarks", "distance", "far",
                 "kamra", "kiraya", "ghar", "chahiye", "dikhao", "jagah", "rehne",
+                # Marathi
+                "खोली", "भाडे", "जागा", "पाहिजे", "दाखवा", "शोधा", "बुकिंग",
             }
 
             if words & profile_words:
@@ -416,6 +445,8 @@ async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict]]:
                 "yes", "ok", "okay", "sure", "go ahead", "please",
                 "yeah", "yep", "yup", "haan", "ha", "theek hai",
                 "kar do", "ho jayega", "confirm", "done", "proceed",
+                # Marathi
+                "हो", "चालेल", "ठीक आहे",
             }
             new_intent_words = {
                 "hello", "hi", "hey", "howdy", "namaste",
@@ -428,8 +459,11 @@ async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict]]:
                 agent_name = last
                 logger.debug("last_agent fallback → %s", last)
 
-    logger.info("user=%s agent=%s msg=%s", user_id, agent_name, message[:60])
-    return agent_name, messages
+    # Track agent usage for analytics
+    track_agent_usage(user_id, agent_name)
+
+    logger.info("user=%s agent=%s lang=%s msg=%s", user_id, agent_name, language, message[:60])
+    return agent_name, messages, language
 
 
 @app.post("/chat/stream", dependencies=[Depends(verify_api_key)])
@@ -447,9 +481,9 @@ async def chat_stream(req: ChatRequest):
             set_whitelabel_pg_ids(req.user_id, pg_ids)
 
     # Route to the correct agent (fast — Haiku + keyword fallback)
-    agent_name, messages = await _route_agent(req.user_id, req.message)
+    agent_name, messages, language = await _route_agent(req.user_id, req.message)
 
-    # Get agent config
+    # Get agent config (with language for prompt injection)
     config_map = {
         "default": default_agent.get_config,
         "broker": broker_agent.get_config,
@@ -457,11 +491,11 @@ async def chat_stream(req: ChatRequest):
         "profile": profile_agent.get_config,
     }
     get_cfg = config_map.get(agent_name, default_agent.get_config)
-    cfg = get_cfg(req.user_id)
+    cfg = get_cfg(req.user_id, language=language)
 
     async def event_generator():
-        # Emit agent_start so frontend knows which agent is handling
-        yield f"event: agent_start\ndata: {json.dumps({'agent': agent_name})}\n\n"
+        # Emit agent_start so frontend knows which agent is handling + locale
+        yield f"event: agent_start\ndata: {json.dumps({'agent': agent_name, 'locale': language})}\n\n"
 
         full_text = ""
         try:
@@ -490,8 +524,8 @@ async def chat_stream(req: ChatRequest):
             logger.warning("parse_message_parts failed: %s", e)
             parts = [{"type": "text", "markdown": full_text}]
 
-        # Emit final done event with the full assembled response + parts
-        yield f"event: done\ndata: {json.dumps({'agent': agent_name, 'full_response': full_text, 'parts': parts})}\n\n"
+        # Emit final done event with the full assembled response + parts + locale
+        yield f"event: done\ndata: {json.dumps({'agent': agent_name, 'full_response': full_text, 'parts': parts, 'locale': language})}\n\n"
 
         # Persist state (same as non-streaming path)
         set_last_agent(req.user_id, agent_name)
@@ -597,7 +631,7 @@ async def whatsapp_webhook(request: Request):
 
     # Run pipeline
     try:
-        response, agent_name = await run_pipeline(user_phone, text)
+        response, agent_name, _lang = await run_pipeline(user_phone, text)
     except Exception as e:
         logger.error("Pipeline error for %s: %s", user_phone, e)
         response = "I'm sorry, I'm having trouble right now. Please try again."
@@ -810,6 +844,96 @@ async def verify_whatsapp_webhook(request: Request):
         return int(challenge) if challenge else ""
 
     raise HTTPException(status_code=403, detail="Verification failed")
+
+
+# ---------------------------------------------------------------------------
+# Language preference (explicit override from frontend)
+# ---------------------------------------------------------------------------
+
+class LanguageRequest(BaseModel):
+    user_id: str
+    language: str  # "en", "hi", or "mr"
+
+
+@app.post("/language", dependencies=[Depends(verify_api_key)])
+async def set_language(req: LanguageRequest):
+    """Allow the frontend to explicitly set the user's preferred language."""
+    if req.language not in ("en", "hi", "mr"):
+        raise HTTPException(status_code=400, detail="language must be 'en', 'hi', or 'mr'")
+    set_user_language(req.user_id, req.language)
+    return {"status": "ok", "language": req.language}
+
+
+# ---------------------------------------------------------------------------
+# Admin analytics
+# ---------------------------------------------------------------------------
+
+@app.get("/admin/analytics", dependencies=[Depends(verify_api_key)])
+async def admin_analytics(time_range: str = "7d"):
+    """Return aggregated analytics data for the dashboard.
+
+    Query params:
+      time_range: "today" | "7d" | "30d"  (default "7d")
+    """
+    from datetime import date, timedelta
+
+    today = date.today()
+
+    if time_range == "today":
+        days = 1
+    elif time_range == "30d":
+        days = 30
+    else:
+        days = 7
+
+    # --- Funnel: aggregate across date range ---
+    funnel_totals: dict[str, int] = {}
+    for i in range(days):
+        day = (today - timedelta(days=i)).isoformat()
+        day_funnel = get_funnel(day)
+        for stage, count in day_funnel.items():
+            funnel_totals[stage] = funnel_totals.get(stage, 0) + count
+
+    # --- Feedback ---
+    feedback = get_feedback_counts()
+
+    # --- Message volume (from Postgres) ---
+    message_volume: dict[str, int] = {}
+    try:
+        start_date = today - timedelta(days=days - 1)
+        message_volume = await pg.get_message_volume(
+            start_date.isoformat(), today.isoformat()
+        )
+    except Exception as e:
+        logger.warning("get_message_volume failed: %s", e)
+
+    # --- Agent distribution: aggregate across date range ---
+    agent_totals: dict[str, int] = {}
+    for i in range(days):
+        day = (today - timedelta(days=i)).isoformat()
+        day_agents = get_agent_usage(day)
+        for agent, count in day_agents.items():
+            agent_totals[agent] = agent_totals.get(agent, 0) + count
+
+    # --- Rate limit status (current snapshot) ---
+    from core.rate_limiter import get_rate_limit_status
+    rate_limits = {}
+    try:
+        rate_limits = get_rate_limit_status("__global__")
+    except Exception:
+        pass
+
+    return {
+        "funnel": funnel_totals,
+        "feedback": feedback,
+        "messages": message_volume,
+        "agents": agent_totals,
+        "rate_limits": rate_limits,
+        "meta": {
+            "range": time_range,
+            "generated_at": datetime.utcnow().isoformat(),
+        },
+    }
 
 
 if __name__ == "__main__":
