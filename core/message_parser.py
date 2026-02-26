@@ -328,20 +328,25 @@ def _build_carousel_parts(
 
 
 def _find_in_info_map(name: str, info_map: list) -> dict | None:
-    """Find a property in the Redis info map by name (case-insensitive, whitespace-normalized)."""
+    """Find a property in the Redis info map by name (case-insensitive, whitespace-normalized).
+
+    Searches in REVERSE order so that newer entries (which may have
+    additional fields like property_lat/property_long) take precedence
+    over older entries for the same property.
+    """
     if not info_map or not name:
         return None
 
     name_norm = re.sub(r"\s+", " ", name.strip().lower())
 
-    for info in info_map:
+    for info in reversed(info_map):
         stored_name = info.get("property_name", "")
         stored_norm = re.sub(r"\s+", " ", stored_name.strip().lower())
         if stored_norm == name_norm:
             return info
 
     # Fuzzy: check if one contains the other (handles minor truncation)
-    for info in info_map:
+    for info in reversed(info_map):
         stored_name = info.get("property_name", "")
         stored_norm = re.sub(r"\s+", " ", stored_name.strip().lower())
         if name_norm in stored_norm or stored_norm in name_norm:

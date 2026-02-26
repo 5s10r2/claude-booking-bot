@@ -309,6 +309,13 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     await _geocode_properties(properties, limit=5)
 
     existing_map = get_property_info_map(user_id)
+    # Build index for fast dedup by prop_id → position in existing_map
+    _existing_idx = {}
+    for _i, _e in enumerate(existing_map):
+        _eid = _e.get("prop_id") or _e.get("property_id")
+        if _eid:
+            _existing_idx[_eid] = _i
+
     property_template = []
 
     results = []
@@ -363,7 +370,13 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
             "property_min_token_amount": min_token,    # alias for payment tool
             "sharing_types": sharing_types_data,
         }
-        existing_map.append(info)
+        # Replace old entry for same property (dedup) or append new
+        if prop_id and prop_id in _existing_idx:
+            existing_map[_existing_idx[prop_id]] = info
+        else:
+            existing_map.append(info)
+            if prop_id:
+                _existing_idx[prop_id] = len(existing_map) - 1
         property_template.append(info)
 
         results.append(
