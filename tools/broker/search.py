@@ -294,10 +294,13 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         eazypg_id = p.get("p_eazypg_id", "")
         image = p.get("p_image", p.get("image", ""))
         distance = p.get("p_distance", p.get("distance", ""))
-        lat_val = p.get("p_latitude", p.get("latitude", ""))
-        long_val = p.get("p_longitude", p.get("longitude", ""))
+        lat_val = (p.get("p_latitude") or p.get("p_lat") or p.get("p_pg_latitude")
+                   or p.get("latitude") or p.get("lat") or "")
+        long_val = (p.get("p_longitude") or p.get("p_long") or p.get("p_pg_longitude")
+                    or p.get("longitude") or p.get("long") or p.get("lng") or "")
         if not lat_val or not long_val:
-            logger.debug("No lat/lng for %s — lat_val=%r, long_val=%r", property_name, lat_val, long_val)
+            logger.debug("No lat/lng for %s — tried p_latitude/p_lat/p_pg_latitude/latitude/lat, "
+                         "p_longitude/p_long/p_pg_longitude/longitude/long/lng — all empty", property_name)
         phone = p.get("p_phone_number", "")
         min_token = p.get("p_min_token_amount", 1000)
         microsite_url = p.get("p_microsite_url", p.get("microsite_url", ""))
