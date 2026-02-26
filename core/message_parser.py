@@ -55,16 +55,16 @@ def parse_message_parts(markdown: str, user_id: str) -> list[dict]:
         r"^#{1,3}\s+[^\d\n]*(\d+)\.\s+(.+)$", markdown, re.MULTILINE
     ))
     if h3_matches:
-        _enrich_h3_matches(markdown, h3_matches)
-        return _build_carousel_parts(markdown, h3_matches, True, user_id)
+        enrichment = _enrich_h3_matches(markdown, h3_matches)
+        return _build_carousel_parts(markdown, h3_matches, True, user_id, enrichment)
 
     # 5. Keycap H3 format: ### 1️⃣ Name
     keycap_matches = list(re.finditer(
         r"^#{1,3}\s+(\d)\ufe0f\u20e3\s+(.+)$", markdown, re.MULTILINE
     ))
     if keycap_matches:
-        _enrich_h3_matches(markdown, keycap_matches)
-        return _build_carousel_parts(markdown, keycap_matches, True, user_id)
+        enrichment = _enrich_h3_matches(markdown, keycap_matches)
+        return _build_carousel_parts(markdown, keycap_matches, True, user_id, enrichment)
 
     # 6. Default — single text part
     return [{"type": "text", "markdown": markdown}]
@@ -151,8 +151,13 @@ def _table_segment_to_part(lines: list[str]) -> dict:
 # Property carousel helpers
 # ------------------------------------------------------------------
 
-def _enrich_h3_matches(text: str, matches: list):
-    """Attach rent and location info to H3/keycap matches from their blocks."""
+def _enrich_h3_matches(text: str, matches: list) -> dict:
+    """Extract rent and location from H3/keycap blocks.
+
+    Returns dict keyed by match index with {rent, location} values.
+    (re.Match objects are immutable so we can't set attributes on them.)
+    """
+    enrichment = {}
     for i, m in enumerate(matches):
         block_start = m.start()
         block_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
@@ -163,10 +168,13 @@ def _enrich_h3_matches(text: str, matches: list):
             re.search(r"[Rr]ent[^\n]*(₹[\d,]+)", block)
         )
         rent_fall = re.search(r"₹[\d,]{4,}(?:/month|/mo)?", block)
-        m._rent = price_m.group(1) if price_m else (rent_fall.group(0) if rent_fall else "")
+        rent = price_m.group(1) if price_m else (rent_fall.group(0) if rent_fall else "")
 
         loc_m = re.search(r"📍\s*([^\n]+)", block)
-        m._location = loc_m.group(1) if loc_m else ""
+        location = loc_m.group(1) if loc_m else ""
+
+        enrichment[i] = {"rent": rent, "location": location}
+    return enrichment
 
 
 def _build_carousel_parts(
@@ -174,8 +182,13 @@ def _build_carousel_parts(
     matches: list,
     is_legacy: bool,
     user_id: str,
+    enrichment: dict | None = None,
 ) -> list[dict]:
-    """Build parts[] from property listing matches."""
+    """Build parts[] from property listing matches.
+
+    Args:
+        enrichment: optional dict from _enrich_h3_matches keyed by match index
+    """
 
     # Load Redis property info for enrichment
     info_map = get_property_info_map(user_id)
@@ -192,14 +205,17 @@ def _build_carousel_parts(
         gender = ""
         distance = ""
 
+        # H3/keycap enrichment data (if available)
+        enr = (enrichment or {}).get(i, {})
+
         if is_legacy:
-            # match.group(3) may exist (legacy bold) or we fall back to _rent attr
+            # match.group(3) may exist (legacy bold) or we fall back to enrichment
             try:
                 price = match.group(3).strip() if match.group(3) else ""
             except IndexError:
                 price = ""
-            if not price and hasattr(match, "_rent"):
-                price = match._rent
+            if not price:
+                price = enr.get("rent", "")
             if not price:
                 pm = re.search(r"💰[^\n]*(₹[\d,]+)", block) or re.search(r"[Rr]ent[^\n]*(₹[\d,]+)", block)
                 if pm:
@@ -208,8 +224,8 @@ def _build_carousel_parts(
             loc_line = re.search(r"📍\s*([^\n]+)", block)
             if loc_line:
                 location = loc_line.group(1).split("·")[0].strip()
-            elif hasattr(match, "_location"):
-                location = match._location.split("·")[0].strip()
+            elif enr.get("location"):
+                location = enr["location"].split("·")[0].strip()
         else:
             # Compact format: match.group(3) is the 📍 line
             meta_line = match.group(3).strip()
