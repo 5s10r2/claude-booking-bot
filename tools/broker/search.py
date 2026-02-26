@@ -100,6 +100,11 @@ async def _call_search_api(payload: dict) -> list:
                 return []
             results = inner.get("data", {}).get("results", [])
             logger.info("API response: status=%d, results=%d", resp.status_code, len(results))
+            if results:
+                sample = results[0]
+                lat_keys = [k for k in sample.keys() if 'lat' in k.lower() or 'long' in k.lower() or 'lng' in k.lower() or 'coord' in k.lower()]
+                logger.info("API fields with lat/long/coord: %s", lat_keys)
+                logger.info("API first result ALL keys: %s", list(sample.keys()))
 
             # Cache successful non-empty results
             if results:
@@ -291,6 +296,8 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         distance = p.get("p_distance", p.get("distance", ""))
         lat_val = p.get("p_latitude", p.get("latitude", ""))
         long_val = p.get("p_longitude", p.get("longitude", ""))
+        if not lat_val or not long_val:
+            logger.debug("No lat/lng for %s — lat_val=%r, long_val=%r", property_name, lat_val, long_val)
         phone = p.get("p_phone_number", "")
         min_token = p.get("p_min_token_amount", 1000)
         microsite_url = p.get("p_microsite_url", p.get("microsite_url", ""))
