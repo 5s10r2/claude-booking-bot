@@ -303,7 +303,7 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat(), "version": "5.3-geocode"}
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.post("/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key)])

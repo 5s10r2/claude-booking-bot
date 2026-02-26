@@ -136,11 +136,6 @@ async def _call_search_api(payload: dict) -> list:
                 return []
             results = inner.get("data", {}).get("results", [])
             logger.info("API response: status=%d, results=%d", resp.status_code, len(results))
-            if results:
-                sample = results[0]
-                lat_keys = [k for k in sample.keys() if 'lat' in k.lower() or 'long' in k.lower() or 'lng' in k.lower() or 'coord' in k.lower()]
-                logger.info("API fields with lat/long/coord: %s", lat_keys)
-                logger.info("API first result ALL keys: %s", list(sample.keys()))
 
             # Cache successful non-empty results
             if results:
