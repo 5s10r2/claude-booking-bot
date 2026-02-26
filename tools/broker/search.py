@@ -73,6 +73,42 @@ async def _geocode_location(location: str) -> tuple:
     return None, None
 
 
+async def _geocode_properties(properties: list[dict], limit: int = 5) -> None:
+    """Geocode property addresses concurrently to fill in missing lat/lng.
+    Mutates the property dicts in-place.  Only processes the first `limit` entries
+    that don't already have coordinates."""
+    import asyncio
+
+    async def _geocode_one(p: dict) -> None:
+        addr = ", ".join(filter(None, [
+            p.get("p_address_line_1", ""),
+            p.get("p_address_line_2", ""),
+            p.get("p_city", ""),
+        ]))
+        if not addr:
+            addr = p.get("p_pg_name", "")
+        if not addr:
+            return
+        lat, lng = await _geocode_location(addr)
+        if lat and lng:
+            p["_geocoded_lat"] = str(lat)
+            p["_geocoded_lng"] = str(lng)
+
+    # Only geocode properties that are missing coordinates
+    to_geocode = []
+    for p in properties[:limit]:
+        has_lat = any(p.get(k) for k in ("p_latitude", "p_lat", "p_pg_latitude", "latitude", "lat"))
+        has_lng = any(p.get(k) for k in ("p_longitude", "p_long", "p_pg_longitude", "longitude", "long", "lng"))
+        if not has_lat or not has_lng:
+            to_geocode.append(p)
+
+    if not to_geocode:
+        return
+
+    logger.info("geocoding %d properties (missing lat/lng)", len(to_geocode))
+    await asyncio.gather(*[_geocode_one(p) for p in to_geocode])
+
+
 async def _call_search_api(payload: dict) -> list:
     """Call Rentok search API and return raw properties list. Uses Redis cache."""
     # Rentok API requires pg_ids to be a non-empty array.
@@ -274,6 +310,9 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     # Enrich top results with images from dedicated images API
     await _enrich_with_images(properties, limit=5)
 
+    # Geocode top properties to get lat/lng for map view
+    await _geocode_properties(properties, limit=5)
+
     existing_map = get_property_info_map(user_id)
     property_template = []
 
@@ -295,12 +334,11 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         image = p.get("p_image", p.get("image", ""))
         distance = p.get("p_distance", p.get("distance", ""))
         lat_val = (p.get("p_latitude") or p.get("p_lat") or p.get("p_pg_latitude")
-                   or p.get("latitude") or p.get("lat") or "")
+                   or p.get("latitude") or p.get("lat")
+                   or p.get("_geocoded_lat") or "")
         long_val = (p.get("p_longitude") or p.get("p_long") or p.get("p_pg_longitude")
-                    or p.get("longitude") or p.get("long") or p.get("lng") or "")
-        if not lat_val or not long_val:
-            logger.debug("No lat/lng for %s — tried p_latitude/p_lat/p_pg_latitude/latitude/lat, "
-                         "p_longitude/p_long/p_pg_longitude/longitude/long/lng — all empty", property_name)
+                    or p.get("longitude") or p.get("long") or p.get("lng")
+                    or p.get("_geocoded_lng") or "")
         phone = p.get("p_phone_number", "")
         min_token = p.get("p_min_token_amount", 1000)
         microsite_url = p.get("p_microsite_url", p.get("microsite_url", ""))
