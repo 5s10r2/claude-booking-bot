@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     CONVERSATION_HISTORY_LIMIT: int = 20
     CONVERSATION_TTL_SECONDS: int = 86400  # 24 hours
 
+    # Rate limiting (per sliding window)
+    RATE_LIMIT_USER_PER_MINUTE: int = 6       # max messages per user per minute
+    RATE_LIMIT_USER_PER_HOUR: int = 30        # max messages per user per hour
+    RATE_LIMIT_GLOBAL_PER_MINUTE: int = 100   # max messages across all users per minute
+
     model_config = {"env_file": ".env", "extra": "ignore", "env_ignore_empty": True}
 
 

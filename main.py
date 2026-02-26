@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 
 from core.log import get_logger
+from core.rate_limiter import check_rate_limit, RateLimitExceeded
 
 logger = get_logger("main")
 from pydantic import BaseModel
@@ -104,6 +105,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Claude Booking Bot", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit 429 handler
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "detail": f"Rate limit exceeded ({exc.tier}). "
+                      f"Try again in {exc.retry_after}s.",
+            "retry_after": exc.retry_after,
+            "tier": exc.tier,
+            "limit": exc.limit,
+        },
+        headers={"Retry-After": str(exc.retry_after)},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +296,8 @@ async def chat(req: ChatRequest):
     if not req.user_id or not req.message:
         raise HTTPException(status_code=400, detail="user_id and message are required")
 
+    check_rate_limit(req.user_id)
+
     # Set account values if provided
     if req.account_values:
         set_account_values(req.user_id, req.account_values)
@@ -416,6 +438,8 @@ async def chat_stream(req: ChatRequest):
     if not req.user_id or not req.message:
         raise HTTPException(status_code=400, detail="user_id and message are required")
 
+    check_rate_limit(req.user_id)
+
     if req.account_values:
         set_account_values(req.user_id, req.account_values)
         pg_ids = req.account_values.get("pg_ids", [])
@@ -533,6 +557,13 @@ async def whatsapp_webhook(request: Request):
 
     if not user_phone or not text:
         return JSONResponse({"status": "empty message"})
+
+    # Rate limiting — protect against WhatsApp message floods
+    try:
+        check_rate_limit(user_phone)
+    except RateLimitExceeded as e:
+        logger.warning("WhatsApp rate limited: user=%s tier=%s", user_phone, e.tier)
+        return JSONResponse({"status": "rate_limited", "retry_after": e.retry_after})
 
     # Dedup: skip if same message within 30s
     active = get_active_request(user_phone)
@@ -749,6 +780,17 @@ async def feedback_stats():
 async def funnel_stats(day: str = None):
     """Return funnel stage counts for a given day (default: today)."""
     return get_funnel(day)
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit status (admin / monitoring)
+# ---------------------------------------------------------------------------
+
+@app.get("/rate-limit/status", dependencies=[Depends(verify_api_key)])
+async def rate_limit_status(user_id: str):
+    """Show current rate-limit usage for a given user."""
+    from core.rate_limiter import get_rate_limit_status
+    return get_rate_limit_status(user_id)
 
 
 # ---------------------------------------------------------------------------
