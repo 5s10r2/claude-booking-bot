@@ -1,0 +1,303 @@
+"""
+message_parser.py — Convert agent markdown into structured parts[].
+
+Mirrors the frontend's renderRichMessage() regex cascade but produces
+typed JSON objects that the frontend can render directly, eliminating
+the need for client-side regex parsing.
+
+Part types:
+  - text:               { type, markdown }
+  - property_carousel:  { type, properties: [{name, location, rent, gender, distance, image, link}] }
+  - comparison_table:   { type, headers, rows, winner }
+"""
+
+import re
+from core.log import get_logger
+from db.redis_store import get_property_info_map
+
+logger = get_logger("core.message_parser")
+
+
+def parse_message_parts(markdown: str, user_id: str) -> list[dict]:
+    """Parse agent markdown into structured parts[].
+
+    Applies the same detection cascade as the frontend's
+    renderRichMessage(), but outputs JSON instead of HTML.
+    Falls back to a single TextPart wrapping the full markdown.
+    """
+    if not markdown or not markdown.strip():
+        return [{"type": "text", "markdown": markdown or ""}]
+
+    # 1. Comparison table (pipe-delimited lines ≥ 3)
+    pipe_lines = [l for l in markdown.split("\n") if re.search(r"\|.*\|", l)]
+    if len(pipe_lines) >= 3:
+        parts = _parse_comparison_segments(markdown)
+        if parts:
+            return parts
+
+    # 2. Compact property format: **N. Name**\n📍 ...
+    compact_matches = list(re.finditer(
+        r"\*\*(\d+)\.\s+(.+?)\*\*\s*\n(📍.+)", markdown
+    ))
+    if compact_matches:
+        return _build_carousel_parts(markdown, compact_matches, False, user_id)
+
+    # 3. Legacy bold format: **N. Name** — ₹X
+    legacy_matches = list(re.finditer(
+        r"\*\*(\d+)\.\s*(.+?)\*\*\s*[—–\-]\s*(₹[\d,]+(?:\/\s*(?:month|mo))?)",
+        markdown,
+    ))
+    if legacy_matches:
+        return _build_carousel_parts(markdown, legacy_matches, True, user_id)
+
+    # 4. H3-header format: ### 🏠 N. Name  or  ### N. Name
+    h3_matches = list(re.finditer(
+        r"^#{1,3}\s+[^\d\n]*(\d+)\.\s+(.+)$", markdown, re.MULTILINE
+    ))
+    if h3_matches:
+        _enrich_h3_matches(markdown, h3_matches)
+        return _build_carousel_parts(markdown, h3_matches, True, user_id)
+
+    # 5. Keycap H3 format: ### 1️⃣ Name
+    keycap_matches = list(re.finditer(
+        r"^#{1,3}\s+(\d)\ufe0f\u20e3\s+(.+)$", markdown, re.MULTILINE
+    ))
+    if keycap_matches:
+        _enrich_h3_matches(markdown, keycap_matches)
+        return _build_carousel_parts(markdown, keycap_matches, True, user_id)
+
+    # 6. Default — single text part
+    return [{"type": "text", "markdown": markdown}]
+
+
+# ------------------------------------------------------------------
+# Comparison table helpers
+# ------------------------------------------------------------------
+
+def _parse_comparison_segments(text: str) -> list[dict]:
+    """Split text into alternating text / table segments."""
+    lines = text.split("\n")
+    segments = []
+    buf, table_buf, in_table = [], [], False
+
+    for line in lines:
+        if re.search(r"\|.*\|", line):
+            if not in_table and buf:
+                segments.append(("text", "\n".join(buf)))
+                buf = []
+            in_table = True
+            table_buf.append(line)
+        else:
+            if in_table:
+                if len(table_buf) >= 3:
+                    segments.append(("table", table_buf))
+                else:
+                    buf.extend(table_buf)
+                table_buf = []
+                in_table = False
+            buf.append(line)
+
+    if in_table and len(table_buf) >= 3:
+        segments.append(("table", table_buf))
+    elif table_buf:
+        buf.extend(table_buf)
+    if buf:
+        segments.append(("text", "\n".join(buf)))
+
+    parts = []
+    for seg_type, content in segments:
+        if seg_type == "table":
+            parts.append(_table_segment_to_part(content))
+        else:
+            stripped = content.strip() if isinstance(content, str) else content
+            if stripped:
+                parts.append({"type": "text", "markdown": stripped})
+    return parts
+
+
+def _table_segment_to_part(lines: list[str]) -> dict:
+    """Convert pipe-table lines into a comparison_table part."""
+    # Filter out separator lines (---|---|---)
+    data_lines = [l for l in lines if not re.match(r"^\s*\|?\s*[-:]+\s*[\|-]", l)]
+    if len(data_lines) < 2:
+        return {"type": "text", "markdown": "\n".join(lines)}
+
+    def parse_row(line):
+        return [c.strip() for c in line.split("|") if c.strip()]
+
+    headers = parse_row(data_lines[0])
+    rows = [parse_row(l) for l in data_lines[1:]]
+
+    # Detect winner row
+    winner_re = re.compile(r"🏆|best pick|pick:|recommended", re.IGNORECASE)
+    winner = None
+    body_rows = []
+    for r in rows:
+        joined = " ".join(r)
+        if winner_re.search(joined):
+            winner = re.sub(r"🏆|best pick:|pick:", "", joined, flags=re.IGNORECASE).strip()
+        else:
+            body_rows.append(r)
+
+    return {
+        "type": "comparison_table",
+        "headers": headers,
+        "rows": body_rows,
+        "winner": winner,
+    }
+
+
+# ------------------------------------------------------------------
+# Property carousel helpers
+# ------------------------------------------------------------------
+
+def _enrich_h3_matches(text: str, matches: list):
+    """Attach rent and location info to H3/keycap matches from their blocks."""
+    for i, m in enumerate(matches):
+        block_start = m.start()
+        block_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[block_start:block_end]
+
+        price_m = (
+            re.search(r"💰[^\n]*(₹[\d,]+)", block) or
+            re.search(r"[Rr]ent[^\n]*(₹[\d,]+)", block)
+        )
+        rent_fall = re.search(r"₹[\d,]{4,}(?:/month|/mo)?", block)
+        m._rent = price_m.group(1) if price_m else (rent_fall.group(0) if rent_fall else "")
+
+        loc_m = re.search(r"📍\s*([^\n]+)", block)
+        m._location = loc_m.group(1) if loc_m else ""
+
+
+def _build_carousel_parts(
+    text: str,
+    matches: list,
+    is_legacy: bool,
+    user_id: str,
+) -> list[dict]:
+    """Build parts[] from property listing matches."""
+
+    # Load Redis property info for enrichment
+    info_map = get_property_info_map(user_id)
+
+    properties = []
+    for i, match in enumerate(matches):
+        name = match.group(2).strip()
+        block_start = match.start()
+        block_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[block_start:block_end]
+
+        price = ""
+        location = ""
+        gender = ""
+        distance = ""
+
+        if is_legacy:
+            # match.group(3) may exist (legacy bold) or we fall back to _rent attr
+            try:
+                price = match.group(3).strip() if match.group(3) else ""
+            except IndexError:
+                price = ""
+            if not price and hasattr(match, "_rent"):
+                price = match._rent
+            if not price:
+                pm = re.search(r"💰[^\n]*(₹[\d,]+)", block) or re.search(r"[Rr]ent[^\n]*(₹[\d,]+)", block)
+                if pm:
+                    price = pm.group(1)
+            # Location from first non-header line
+            loc_line = re.search(r"📍\s*([^\n]+)", block)
+            if loc_line:
+                location = loc_line.group(1).split("·")[0].strip()
+            elif hasattr(match, "_location"):
+                location = match._location.split("·")[0].strip()
+        else:
+            # Compact format: match.group(3) is the 📍 line
+            meta_line = match.group(3).strip()
+            parts = [p.strip() for p in re.sub(r"^📍\s*", "", meta_line).split("·")]
+            location = parts[0] if parts else ""
+            pm = re.search(r"₹[\d,]+(?:/mo(?:nth)?)?", meta_line)
+            price = pm.group(0).replace("/month", "/mo") if pm else ""
+            for p in parts:
+                if re.match(r"^(Any|Boys|Girls|All Boys|All Girls|Mixed)", p, re.IGNORECASE):
+                    gender = p
+                elif re.search(r"~?[\d.]+\s*km", p, re.IGNORECASE):
+                    distance = p
+
+        # Extract image and link from block
+        img_m = re.search(r"(?:Image:\s*|!\[[^\]]*\]\()(https?://[^\s)]+)", block, re.IGNORECASE)
+        link_m = re.search(r"Link:\s*(https?://\S+)", block, re.IGNORECASE)
+        image = img_m.group(1) if img_m else ""
+        link = link_m.group(1) if link_m else ""
+
+        # Enrich from Redis property info
+        redis_info = _find_in_info_map(name, info_map)
+        if redis_info:
+            if not image:
+                image = redis_info.get("property_image", "")
+            if not link:
+                link = redis_info.get("property_link", "")
+            if not price:
+                price = redis_info.get("property_rent", "")
+            if not location:
+                location = redis_info.get("property_location", "")
+            if not gender:
+                gender = redis_info.get("pg_available_for", "")
+
+        properties.append({
+            "name": name,
+            "location": location,
+            "rent": price,
+            "gender": gender,
+            "distance": distance,
+            "image": image,
+            "link": link,
+        })
+
+    # Text before first match
+    pre_text = text[:matches[0].start()].strip()
+
+    # Text after last property block (find separator after last match)
+    last_start = matches[-1].start()
+    from_last = text[last_start:]
+    close_sep = re.search(r"\n[-*]{3,}\s*(?:\n|$)", from_last)
+    post_text = ""
+    if close_sep:
+        post_start = last_start + close_sep.start() + len(close_sep.group(0))
+        post_text = text[post_start:].strip()
+    else:
+        double_nl = re.search(r"\n\n(?!\s*(?:📍|💰|👥|🏷|#{1,3}))", from_last)
+        post_text = from_last[double_nl.start():].strip() if double_nl else ""
+    # Clean up meta lines from post text
+    post_text = re.sub(r"^(?:Image|Link|Match|Distance|For|Type):.*$", "", post_text, flags=re.MULTILINE | re.IGNORECASE)
+    post_text = re.sub(r"\n{3,}", "\n\n", post_text).strip()
+
+    parts = []
+    if pre_text:
+        parts.append({"type": "text", "markdown": pre_text})
+    parts.append({"type": "property_carousel", "properties": properties})
+    if post_text:
+        parts.append({"type": "text", "markdown": post_text})
+    return parts
+
+
+def _find_in_info_map(name: str, info_map: list) -> dict | None:
+    """Find a property in the Redis info map by name (case-insensitive, whitespace-normalized)."""
+    if not info_map or not name:
+        return None
+
+    name_norm = re.sub(r"\s+", " ", name.strip().lower())
+
+    for info in info_map:
+        stored_name = info.get("property_name", "")
+        stored_norm = re.sub(r"\s+", " ", stored_name.strip().lower())
+        if stored_norm == name_norm:
+            return info
+
+    # Fuzzy: check if one contains the other (handles minor truncation)
+    for info in info_map:
+        stored_name = info.get("property_name", "")
+        stored_norm = re.sub(r"\s+", " ", stored_name.strip().lower())
+        if name_norm in stored_norm or stored_norm in name_norm:
+            return info
+
+    return None

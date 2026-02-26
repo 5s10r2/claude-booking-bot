@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from config import settings
 from core.claude import AnthropicEngine
 from core.conversation import ConversationManager
+from core.message_parser import parse_message_parts
 from core.tool_executor import ToolExecutor
 from tools.registry import init_registry, get_all_handlers
 from db import postgres as pg
@@ -118,6 +119,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     agent: str = ""
+    parts: list[dict] = []
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +307,14 @@ async def chat(req: ChatRequest):
         pg_ids=pg_ids_list,
     )
 
-    return ChatResponse(response=response, agent=agent_name)
+    # Parse structured parts for frontend rendering
+    try:
+        parts = parse_message_parts(response, req.user_id)
+    except Exception as e:
+        logger.warning("parse_message_parts failed: %s", e)
+        parts = [{"type": "text", "markdown": response}]
+
+    return ChatResponse(response=response, agent=agent_name, parts=parts)
 
 
 # ---------------------------------------------------------------------------
@@ -450,8 +459,15 @@ async def chat_stream(req: ChatRequest):
             yield f"event: error\ndata: {json.dumps({'text': error_msg})}\n\n"
             full_text = full_text or error_msg
 
-        # Emit final done event with the full assembled response
-        yield f"event: done\ndata: {json.dumps({'agent': agent_name, 'full_response': full_text})}\n\n"
+        # Parse structured parts for frontend rendering
+        try:
+            parts = parse_message_parts(full_text, req.user_id)
+        except Exception as e:
+            logger.warning("parse_message_parts failed: %s", e)
+            parts = [{"type": "text", "markdown": full_text}]
+
+        # Emit final done event with the full assembled response + parts
+        yield f"event: done\ndata: {json.dumps({'agent': agent_name, 'full_response': full_text, 'parts': parts})}\n\n"
 
         # Persist state (same as non-streaming path)
         set_last_agent(req.user_id, agent_name)
