@@ -19,7 +19,7 @@ async def route(engine: AnthropicEngine, messages: list[dict]) -> str:
     # which requires at most 1 prior assistant + 1 current user message.
     # 4 messages (2 full turns) covers all routing rules with padding.
     trimmed = messages[-4:] if len(messages) > 4 else messages
-    result = engine.classify(
+    result = await engine.classify(
         system_prompt=SUPERVISOR_PROMPT,
         messages=trimmed,
         model=settings.HAIKU_MODEL,

@@ -1,3 +1,4 @@
+import asyncio
 import time
 from typing import Optional
 
@@ -9,7 +10,7 @@ from core.tool_executor import ToolExecutor
 
 class AnthropicEngine:
     def __init__(self, tool_executor: ToolExecutor):
-        self.client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        self.client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
         self.tool_executor = tool_executor
 
     async def run_agent(
@@ -40,7 +41,7 @@ class AnthropicEngine:
             cached_tools.append(t)
 
         for iteration in range(max_iterations):
-            response = self._call_api(model, system, cached_tools, messages)
+            response = await self._call_api(model, system, cached_tools, messages)
             if response is None:
                 return "I'm experiencing a temporary issue. Please try again."
 
@@ -55,19 +56,25 @@ class AnthropicEngine:
                     "content": self._serialize_content(response.content),
                 })
 
+                # Collect all tool_use blocks and execute in parallel
+                tool_blocks = [b for b in response.content if b.type == "tool_use"]
+
+                for b in tool_blocks:
+                    print(f"[tool] calling: {b.name} | input: {b.input}")
+
+                results = await asyncio.gather(*[
+                    self.tool_executor.execute(b.name, b.input, user_id)
+                    for b in tool_blocks
+                ])
+
                 tool_results = []
-                for block in response.content:
-                    if block.type == "tool_use":
-                        print(f"[tool] calling: {block.name} | input: {block.input}")
-                        result = await self.tool_executor.execute(
-                            block.name, block.input, user_id
-                        )
-                        print(f"[tool] result: {block.name} → {str(result)[:300]}")
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": str(result),
-                        })
+                for block, result in zip(tool_blocks, results):
+                    print(f"[tool] result: {block.name} → {str(result)[:300]}")
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": str(result),
+                    })
 
                 messages.append({"role": "user", "content": tool_results})
                 continue
@@ -76,7 +83,7 @@ class AnthropicEngine:
 
         return "I'm having trouble processing this request. Could you rephrase?"
 
-    def classify(
+    async def classify(
         self,
         system_prompt: str,
         messages: list[dict],
@@ -93,7 +100,7 @@ class AnthropicEngine:
 
         for attempt in range(3):
             try:
-                response = self.client.messages.create(
+                response = await self.client.messages.create(
                     model=model,
                     max_tokens=256,
                     system=system,
@@ -107,10 +114,10 @@ class AnthropicEngine:
                     return json.loads(cleaned)
             except Exception as e:
                 print(f"[claude] classify attempt {attempt + 1} failed: {e}")
-                time.sleep(0.5)
+                await asyncio.sleep(0.5)
         return None
 
-    def _call_api(
+    async def _call_api(
         self,
         model: str,
         system: list,
@@ -128,16 +135,16 @@ class AnthropicEngine:
                 }
                 if tools:
                     kwargs["tools"] = tools
-                return self.client.messages.create(**kwargs)
+                return await self.client.messages.create(**kwargs)
             except anthropic.RateLimitError:
                 wait = 2 ** attempt
                 print(f"[claude] rate limited, waiting {wait}s...")
-                time.sleep(wait)
+                await asyncio.sleep(wait)
             except anthropic.APIError as e:
                 print(f"[claude] API error: {e}")
                 if attempt == max_retries - 1:
                     return None
-                time.sleep(1)
+                await asyncio.sleep(1)
         return None
 
     @staticmethod
