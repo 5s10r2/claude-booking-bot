@@ -5,6 +5,7 @@ Endpoints:
 - POST /webhook/whatsapp   — WhatsApp incoming messages
 - POST /webhook/payment    — Payment confirmation callback
 - POST /chat               — Streamlit / API clients
+- POST /chat/stream        — SSE streaming responses
 - POST /knowledge-base     — Upload PDFs/QA pairs to FAISS vectorstore
 - POST /query              — Query knowledge base
 - GET  /health             — Health check
@@ -17,7 +18,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Security
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 
 from core.log import get_logger
@@ -305,6 +306,178 @@ async def chat(req: ChatRequest):
     )
 
     return ChatResponse(response=response, agent=agent_name)
+
+
+# ---------------------------------------------------------------------------
+# SSE streaming endpoint
+# ---------------------------------------------------------------------------
+
+async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict]]:
+    """Shared routing logic: returns (agent_name, messages).
+
+    Applies supervisor + keyword safety net + last-agent fallback —
+    identical to run_pipeline but without running the agent itself.
+    """
+    history = conversation.get_history(user_id)
+    conversation.add_user_message(user_id, message)
+    messages = history + [{"role": "user", "content": message}]
+
+    agent_name = await supervisor.route(engine, messages)
+
+    # --- keyword safety net (same logic as run_pipeline) ---
+    msg_lower = message.lower()
+    if agent_name == "default":
+        msg_clean = re.sub(r"[^\w\s-]", " ", msg_lower)
+        words = set(msg_clean.split())
+
+        profile_phrases = [
+            "my visit", "my visits", "my booking", "my bookings",
+            "my schedule", "my event", "my events",
+            "my preference", "my preferences", "my profile",
+            "shortlisted propert", "saved propert",
+            "booking status", "visit status", "scheduled event",
+        ]
+        broker_phrases = [
+            "more about", "tell me about",
+            "details of", "details about", "details for",
+            "images of", "photos of", "pictures of",
+            "far from", "distance from", "distance to",
+            "shortlist this", "shortlist the",
+        ]
+
+        if any(p in msg_lower for p in profile_phrases):
+            agent_name = "profile"
+        elif any(p in msg_lower for p in broker_phrases):
+            agent_name = "broker"
+        else:
+            profile_words = {
+                "profile", "preference", "preferences", "upcoming",
+                "events", "visits", "bookings", "shortlisted",
+            }
+            booking_words = {
+                "visit", "schedule", "book", "appointment", "call", "video",
+                "tour", "payment", "pay", "token", "kyc", "aadhaar", "otp",
+                "reserve", "cancel", "reschedule",
+            }
+            broker_words = {
+                "find", "search", "looking", "property", "properties",
+                "pg", "flat", "apartment", "hostel", "coliving", "co-living",
+                "room", "rent", "budget", "area", "location", "available",
+                "recommend", "suggest", "bhk", "1bhk", "2bhk", "rk",
+                "single", "double", "girls", "boys", "sharing",
+                "place", "stay", "accommodation", "housing", "near", "nearby",
+                "shortlist", "details", "images", "photos",
+                "landmark", "landmarks", "distance", "far",
+                "kamra", "kiraya", "ghar", "chahiye", "dikhao", "jagah", "rehne",
+            }
+
+            if words & profile_words:
+                agent_name = "profile"
+            elif words & booking_words:
+                agent_name = "booking"
+            elif words & broker_words:
+                agent_name = "broker"
+
+    if agent_name == "default":
+        last = get_last_agent(user_id)
+        if last and last != "default":
+            affirmatives = {
+                "yes", "ok", "okay", "sure", "go ahead", "please",
+                "yeah", "yep", "yup", "haan", "ha", "theek hai",
+                "kar do", "ho jayega", "confirm", "done", "proceed",
+            }
+            new_intent_words = {
+                "hello", "hi", "hey", "howdy", "namaste",
+                "thanks", "thank", "bye", "goodbye",
+                "what", "who", "where", "when", "how", "why", "which",
+            }
+            msg_stripped = msg_lower.strip().rstrip(".!,?")
+            is_new_intent = bool(words & new_intent_words)
+            if msg_stripped in affirmatives or (len(message.split()) <= 5 and not is_new_intent):
+                agent_name = last
+                logger.debug("last_agent fallback → %s", last)
+
+    logger.info("user=%s agent=%s msg=%s", user_id, agent_name, message[:60])
+    return agent_name, messages
+
+
+@app.post("/chat/stream", dependencies=[Depends(verify_api_key)])
+async def chat_stream(req: ChatRequest):
+    """SSE streaming endpoint — streams agent events as they happen."""
+    if not req.user_id or not req.message:
+        raise HTTPException(status_code=400, detail="user_id and message are required")
+
+    if req.account_values:
+        set_account_values(req.user_id, req.account_values)
+        pg_ids = req.account_values.get("pg_ids", [])
+        if pg_ids:
+            set_whitelabel_pg_ids(req.user_id, pg_ids)
+
+    # Route to the correct agent (fast — Haiku + keyword fallback)
+    agent_name, messages = await _route_agent(req.user_id, req.message)
+
+    # Get agent config
+    config_map = {
+        "default": default_agent.get_config,
+        "broker": broker_agent.get_config,
+        "booking": booking_agent.get_config,
+        "profile": profile_agent.get_config,
+    }
+    get_cfg = config_map.get(agent_name, default_agent.get_config)
+    cfg = get_cfg(req.user_id)
+
+    async def event_generator():
+        # Emit agent_start so frontend knows which agent is handling
+        yield f"event: agent_start\ndata: {json.dumps({'agent': agent_name})}\n\n"
+
+        full_text = ""
+        try:
+            async for ev in engine.run_agent_stream(
+                system_prompt=cfg["system_prompt"],
+                tools=cfg["tools"],
+                messages=messages,
+                model=cfg["model"],
+                user_id=req.user_id,
+                tool_executor=cfg["executor"],
+            ):
+                yield f"event: {ev['event']}\ndata: {json.dumps(ev['data'])}\n\n"
+                if ev["event"] == "content_delta":
+                    full_text += ev["data"]["text"]
+
+        except Exception as e:
+            logger.error("stream error: %s", e)
+            error_msg = "I'm experiencing a temporary issue. Please try again."
+            yield f"event: error\ndata: {json.dumps({'text': error_msg})}\n\n"
+            full_text = full_text or error_msg
+
+        # Emit final done event with the full assembled response
+        yield f"event: done\ndata: {json.dumps({'agent': agent_name, 'full_response': full_text})}\n\n"
+
+        # Persist state (same as non-streaming path)
+        set_last_agent(req.user_id, agent_name)
+        conversation.add_assistant_message(req.user_id, full_text)
+
+        pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
+        await pg.insert_message(
+            thread_id=req.user_id, user_phone=req.user_id,
+            message_text=req.message, message_sent_by=1,
+            platform_type="api", is_template=False, pg_ids=pg_ids_list,
+        )
+        await pg.insert_message(
+            thread_id=req.user_id, user_phone=req.user_id,
+            message_text=full_text, message_sent_by=2,
+            platform_type="api", is_template=False, pg_ids=pg_ids_list,
+        )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable Nginx buffering on Render
+        },
+    )
 
 
 @app.post("/webhook/whatsapp", dependencies=[Depends(verify_api_key)])

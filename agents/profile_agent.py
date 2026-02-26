@@ -12,13 +12,9 @@ from db.redis_store import get_account_values
 from utils.date import today_date, current_day
 
 
-async def run(
-    engine: AnthropicEngine,
-    messages: list[dict],
-    user_id: str,
-) -> str:
+def get_config(user_id: str) -> dict:
+    """Return agent setup for use by both run() and streaming endpoint."""
     account = get_account_values(user_id)
-
     system_prompt = format_prompt(
         PROFILE_AGENT_PROMPT,
         brand_name=account.get("brand_name", "our platform"),
@@ -27,21 +23,33 @@ async def run(
         today_date=today_date(),
         current_day=current_day(),
     )
-
     tools = get_schemas_for_agent("profile")
-
     executor = ToolExecutor()
     executor.register_many(get_handlers_for_agent("profile"))
+    return {
+        "system_prompt": system_prompt,
+        "tools": tools,
+        "model": settings.HAIKU_MODEL,
+        "executor": executor,
+    }
+
+
+async def run(
+    engine: AnthropicEngine,
+    messages: list[dict],
+    user_id: str,
+) -> str:
+    cfg = get_config(user_id)
 
     original_executor = engine.tool_executor
-    engine.tool_executor = executor
+    engine.tool_executor = cfg["executor"]
 
     try:
         response = await engine.run_agent(
-            system_prompt=system_prompt,
-            tools=tools,
+            system_prompt=cfg["system_prompt"],
+            tools=cfg["tools"],
             messages=messages,
-            model=settings.HAIKU_MODEL,
+            model=cfg["model"],
             user_id=user_id,
         )
     finally:

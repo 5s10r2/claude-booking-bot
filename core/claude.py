@@ -1,6 +1,7 @@
 import asyncio
+import json as _json
 import time
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 import anthropic
 
@@ -85,6 +86,139 @@ class AnthropicEngine:
             return self._extract_text(response)
 
         return "I'm having trouble processing this request. Could you rephrase?"
+
+    # ------------------------------------------------------------------
+    # Streaming variant — yields SSE event dicts
+    # ------------------------------------------------------------------
+
+    async def run_agent_stream(
+        self,
+        system_prompt: str,
+        tools: list[dict],
+        messages: list[dict],
+        model: str,
+        user_id: str,
+        tool_executor: ToolExecutor | None = None,
+        max_iterations: int | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Streaming version of run_agent. Yields dicts like
+        {"event": "content_delta", "data": {"text": "…"}} that the
+        caller serialises as SSE frames.
+        """
+        if max_iterations is None:
+            max_iterations = settings.MAX_AGENT_ITERATIONS
+
+        executor = tool_executor or self.tool_executor
+
+        system = [
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
+        cached_tools = []
+        for i, tool in enumerate(tools):
+            t = dict(tool)
+            if i == len(tools) - 1:
+                t["cache_control"] = {"type": "ephemeral"}
+            cached_tools.append(t)
+
+        for iteration in range(max_iterations):
+            logger.debug("stream iteration %d/%d", iteration + 1, max_iterations)
+
+            kwargs = {
+                "model": model,
+                "max_tokens": 4096,
+                "system": system,
+                "messages": messages,
+            }
+            if cached_tools:
+                kwargs["tools"] = cached_tools
+
+            # Track tool-use blocks built from deltas
+            current_tool_id: str | None = None
+            current_tool_name: str | None = None
+            current_tool_json = ""
+
+            try:
+                async with self.client.messages.stream(**kwargs) as stream:
+                    async for event in stream:
+                        # -- text deltas --
+                        if event.type == "content_block_delta":
+                            if hasattr(event.delta, "text"):
+                                yield {"event": "content_delta", "data": {"text": event.delta.text}}
+                            elif hasattr(event.delta, "partial_json"):
+                                current_tool_json += event.delta.partial_json
+
+                        # -- block boundaries --
+                        elif event.type == "content_block_start":
+                            block = event.content_block
+                            if block.type == "tool_use":
+                                current_tool_id = block.id
+                                current_tool_name = block.name
+                                current_tool_json = ""
+                                logger.info("stream tool call: %s", block.name)
+                                yield {"event": "tool_start", "data": {"tool": block.name}}
+
+                        elif event.type == "content_block_stop":
+                            # Reset per-block trackers (tool input fully received)
+                            current_tool_id = None
+                            current_tool_name = None
+                            current_tool_json = ""
+
+                    # Get fully-assembled response for the tool-use loop
+                    response = await stream.get_final_message()
+
+            except anthropic.RateLimitError:
+                logger.warning("rate limited during stream")
+                await asyncio.sleep(2)
+                continue
+            except anthropic.APIError as e:
+                logger.error("API error during stream: %s", e)
+                yield {"event": "error", "data": {"text": "I'm experiencing a temporary issue. Please try again."}}
+                return
+
+            if response is None:
+                yield {"event": "error", "data": {"text": "I'm experiencing a temporary issue. Please try again."}}
+                return
+
+            logger.debug("stream stop_reason=%s", response.stop_reason)
+
+            if response.stop_reason == "end_turn":
+                return  # all text already streamed via content_delta events
+
+            if response.stop_reason == "tool_use":
+                # Append assistant turn so the loop can continue
+                messages.append({
+                    "role": "assistant",
+                    "content": self._serialize_content(response.content),
+                })
+
+                # Execute all tool calls in parallel
+                tool_blocks = [b for b in response.content if b.type == "tool_use"]
+
+                results = await asyncio.gather(*[
+                    executor.execute(b.name, b.input, user_id)
+                    for b in tool_blocks
+                ])
+
+                tool_results = []
+                for block, result in zip(tool_blocks, results):
+                    logger.debug("stream tool result: %s → %s", block.name, str(result)[:200])
+                    yield {"event": "tool_done", "data": {"tool": block.name}}
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": str(result),
+                    })
+
+                messages.append({"role": "user", "content": tool_results})
+                continue
+
+            # Unexpected stop reason — text was already streamed
+            return
 
     async def classify(
         self,
