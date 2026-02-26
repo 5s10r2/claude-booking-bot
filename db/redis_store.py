@@ -385,3 +385,55 @@ def load_vectorstore_from_redis(file_hash: str):
     import shutil
     shutil.rmtree(f"/tmp/faiss_{file_hash}", ignore_errors=True)
     return vectorstore
+
+
+# ---------------------------------------------------------------------------
+# Feedback (thumbs up / down)
+# ---------------------------------------------------------------------------
+
+def save_feedback(user_id: str, message_snippet: str, rating: str, agent: str = "") -> None:
+    """Store a feedback entry. rating is 'up' or 'down'."""
+    entry = json.dumps({
+        "user_id": user_id,
+        "snippet": message_snippet[:200],
+        "rating": rating,
+        "agent": agent,
+        "ts": __import__("time").time(),
+    })
+    _r().rpush("feedback:log", entry)
+    # Aggregate counters per agent
+    _r().hincrby("feedback:counts", f"{agent}:{rating}", 1)
+    _r().hincrby("feedback:counts", f"total:{rating}", 1)
+
+
+def get_feedback_counts() -> dict:
+    """Return all feedback counters as a dict."""
+    raw = _r().hgetall("feedback:counts")
+    return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
+
+
+# ---------------------------------------------------------------------------
+# Funnel tracking (search → detail → shortlist → visit → booking)
+# ---------------------------------------------------------------------------
+
+FUNNEL_STAGES = ("search", "detail", "shortlist", "visit", "booking")
+
+
+def track_funnel(user_id: str, stage: str) -> None:
+    """Increment a funnel stage counter. Idempotent per user+stage per day."""
+    if stage not in FUNNEL_STAGES:
+        return
+    from datetime import date
+    day = date.today().isoformat()
+    key = f"funnel:{day}"
+    _r().hincrby(key, stage, 1)
+    _r().expire(key, 90 * 86400)  # keep 90 days
+
+
+def get_funnel(day: str = None) -> dict:
+    """Return funnel counts for a given day (default: today)."""
+    if day is None:
+        from datetime import date
+        day = date.today().isoformat()
+    raw = _r().hgetall(f"funnel:{day}")
+    return {k.decode(): int(v) for k, v in raw.items()} if raw else {}

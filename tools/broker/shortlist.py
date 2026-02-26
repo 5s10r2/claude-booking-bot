@@ -1,7 +1,7 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map, get_whitelabel_pg_ids
+from db.redis_store import get_property_info_map, get_whitelabel_pg_ids, track_funnel
 
 
 async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
@@ -37,4 +37,5 @@ async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
     except Exception as e:
         return f"Error shortlisting property: {str(e)}"
 
+    track_funnel(user_id, "shortlist")
     return f"Property '{prop.get('property_name', property_name)}' has been shortlisted successfully."

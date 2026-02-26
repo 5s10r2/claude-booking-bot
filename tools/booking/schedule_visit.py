@@ -1,7 +1,7 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map, get_account_values
+from db.redis_store import get_property_info_map, get_account_values, track_funnel
 from utils.date import transcribe_date
 
 
@@ -67,6 +67,7 @@ async def save_visit_time(
     maps_link = f"https://www.google.com/maps?q={prop_lat},{prop_long}" if prop_lat and prop_long else ""
     location_info = f"\nLocation: {maps_link}" if maps_link else ""
 
+    track_funnel(user_id, "visit")
     return (
         f"Visit scheduled successfully for '{prop.get('property_name', property_name)}' "
         f"on {visit_date} at {visit_time} ({visit_type}).{location_info}"

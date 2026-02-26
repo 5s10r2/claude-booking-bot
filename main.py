@@ -46,6 +46,10 @@ from db.redis_store import (
     get_file_hash,
     get_last_agent,
     set_last_agent,
+    save_feedback,
+    get_feedback_counts,
+    track_funnel,
+    get_funnel,
 )
 from agents import supervisor, default_agent, broker_agent, booking_agent, profile_agent, room_agent
 from channels.whatsapp import send_text, send_carousel, send_images
@@ -520,6 +524,42 @@ async def query_kb(request: Request):
     response = await room_agent.run(engine, messages, user_id, file_hash=file_hash)
 
     return JSONResponse({"response": response})
+
+
+# ---------------------------------------------------------------------------
+# Feedback
+# ---------------------------------------------------------------------------
+
+class FeedbackRequest(BaseModel):
+    user_id: str
+    message_snippet: str = ""
+    rating: str  # "up" or "down"
+    agent: str = ""
+
+
+@app.post("/feedback", dependencies=[Depends(verify_api_key)])
+async def submit_feedback(req: FeedbackRequest):
+    """Record thumbs-up / thumbs-down feedback on a bot response."""
+    if req.rating not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="rating must be 'up' or 'down'")
+    save_feedback(req.user_id, req.message_snippet, req.rating, req.agent)
+    return {"status": "ok"}
+
+
+@app.get("/feedback/stats", dependencies=[Depends(verify_api_key)])
+async def feedback_stats():
+    """Return aggregate feedback counters."""
+    return get_feedback_counts()
+
+
+# ---------------------------------------------------------------------------
+# Funnel tracking
+# ---------------------------------------------------------------------------
+
+@app.get("/funnel", dependencies=[Depends(verify_api_key)])
+async def funnel_stats(day: str = None):
+    """Return funnel stage counts for a given day (default: today)."""
+    return get_funnel(day)
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ from db.redis_store import (
     set_payment_info,
     get_payment_info,
     clear_payment_info,
+    track_funnel,
 )
 
 
@@ -146,4 +147,5 @@ async def verify_payment(user_id: str, **kwargs) -> str:
             pass
 
     clear_payment_info(user_id)
+    track_funnel(user_id, "booking")
     return f"Payment verified successfully for {pg_name}. You can now proceed with bed reservation."

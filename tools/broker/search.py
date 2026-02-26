@@ -15,6 +15,7 @@ from db.redis_store import (
     save_property_template,
     get_whitelabel_pg_ids,
     save_preferences as redis_save_preferences,
+    track_funnel,
     _r as _redis,
 )
 
@@ -326,5 +327,6 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
 
     set_property_info_map(user_id, existing_map)
     save_property_template(user_id, property_template[:5])
+    track_funnel(user_id, "search")
 
     return f"{relaxed_note}Found {len(properties)} properties. Here are the results:\n" + "\n".join(results)
