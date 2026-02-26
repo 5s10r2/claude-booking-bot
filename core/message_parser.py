@@ -7,13 +7,13 @@ the need for client-side regex parsing.
 
 Part types:
   - text:               { type, markdown }
-  - property_carousel:  { type, properties: [{name, location, rent, gender, distance, image, link}] }
+  - property_carousel:  { type, properties: [{name, location, rent, gender, distance, image, link, lat, lng}], map_center }
   - comparison_table:   { type, headers, rows, winner }
 """
 
 import re
 from core.log import get_logger
-from db.redis_store import get_property_info_map
+from db.redis_store import get_property_info_map, get_preferences
 
 logger = get_logger("core.message_parser")
 
@@ -259,6 +259,13 @@ def _build_carousel_parts(
             if not gender:
                 gender = redis_info.get("pg_available_for", "")
 
+        # Lat/lng for map view
+        lat = ""
+        lng = ""
+        if redis_info:
+            lat = str(redis_info.get("property_lat", "")) if redis_info.get("property_lat") else ""
+            lng = str(redis_info.get("property_long", "")) if redis_info.get("property_long") else ""
+
         properties.append({
             "name": name,
             "location": location,
@@ -267,6 +274,8 @@ def _build_carousel_parts(
             "distance": distance,
             "image": image,
             "link": link,
+            "lat": lat,
+            "lng": lng,
         })
 
     # Text before first match
@@ -287,10 +296,32 @@ def _build_carousel_parts(
     post_text = re.sub(r"^(?:Image|Link|Match|Distance|For|Type):.*$", "", post_text, flags=re.MULTILINE | re.IGNORECASE)
     post_text = re.sub(r"\n{3,}", "\n\n", post_text).strip()
 
+    # Compute map_center from stored search coords, or average property coords
+    prefs = get_preferences(user_id)
+    search_lat = prefs.get("search_lat", "")
+    search_lng = prefs.get("search_lng", "")
+    map_center = None
+    if search_lat and search_lng:
+        try:
+            map_center = {"lat": float(search_lat), "lng": float(search_lng)}
+        except (ValueError, TypeError):
+            pass
+    if not map_center:
+        # Fallback: average of property coordinates
+        valid_coords = [(float(p["lat"]), float(p["lng"])) for p in properties if p.get("lat") and p.get("lng")]
+        if valid_coords:
+            map_center = {
+                "lat": sum(c[0] for c in valid_coords) / len(valid_coords),
+                "lng": sum(c[1] for c in valid_coords) / len(valid_coords),
+            }
+
     parts = []
     if pre_text:
         parts.append({"type": "text", "markdown": pre_text})
-    parts.append({"type": "property_carousel", "properties": properties})
+    carousel_part = {"type": "property_carousel", "properties": properties}
+    if map_center:
+        carousel_part["map_center"] = map_center
+    parts.append(carousel_part)
     if post_text:
         parts.append({"type": "text", "markdown": post_text})
     return parts

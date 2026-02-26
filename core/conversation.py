@@ -11,6 +11,19 @@ class ConversationManager:
         save_conversation(user_id, messages)
         return messages
 
+    async def add_user_message_with_summary(self, user_id: str, content: str) -> list[dict]:
+        """Add user message and run summarization if conversation is long.
+
+        Returns the (potentially compacted) message list ready for Claude.
+        """
+        from core.summarizer import maybe_summarize
+
+        messages = self.get_history(user_id)
+        messages.append({"role": "user", "content": content})
+        messages = await maybe_summarize(messages, user_id)
+        save_conversation(user_id, messages)
+        return messages
+
     def add_assistant_message(self, user_id: str, content: str) -> list[dict]:
         messages = self.get_history(user_id)
         messages.append({"role": "assistant", "content": content})

@@ -161,12 +161,8 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     if detected_lang != "en":
         set_user_language(user_id, detected_lang)
 
-    # Load conversation history
-    history = conversation.get_history(user_id)
-    conversation.add_user_message(user_id, message)
-
-    # Build messages for Claude
-    messages = history + [{"role": "user", "content": message}]
+    # Load conversation history + summarize if needed
+    messages = await conversation.add_user_message_with_summary(user_id, message)
 
     # Step 1: Supervisor routes to agent
     agent_name = await supervisor.route(engine, messages)
@@ -376,9 +372,7 @@ async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict], str
     if detected_lang != "en":
         set_user_language(user_id, detected_lang)
 
-    history = conversation.get_history(user_id)
-    conversation.add_user_message(user_id, message)
-    messages = history + [{"role": "user", "content": message}]
+    messages = await conversation.add_user_message_with_summary(user_id, message)
 
     agent_name = await supervisor.route(engine, messages)
 

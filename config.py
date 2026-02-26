@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     CONVERSATION_HISTORY_LIMIT: int = 20
     CONVERSATION_TTL_SECONDS: int = 86400  # 24 hours
 
+    # Conversation summarization
+    SUMMARIZE_THRESHOLD: int = 30       # trigger summarization at this message count
+    SUMMARIZE_KEEP_RECENT: int = 10     # keep this many recent messages verbatim
+
     # Rate limiting (per sliding window)
     RATE_LIMIT_USER_PER_MINUTE: int = 6       # max messages per user per minute
     RATE_LIMIT_USER_PER_HOUR: int = 30        # max messages per user per hour

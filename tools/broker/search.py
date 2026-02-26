@@ -182,6 +182,11 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
 
     logger.info("geocoded '%s' → lat=%s, lng=%s", location, lat, lng)
 
+    # Persist search center for map view
+    prefs["search_lat"] = str(lat) if lat else ""
+    prefs["search_lng"] = str(lng) if lng else ""
+    redis_save_preferences(user_id, prefs)
+
     # Step 2: Get PG IDs
     pg_ids = get_whitelabel_pg_ids(user_id)
 

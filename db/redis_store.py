@@ -71,7 +71,11 @@ def get_conversation(user_id: str) -> list[dict]:
 
 
 def save_conversation(user_id: str, messages: list[dict]) -> None:
-    trimmed = messages[-settings.CONVERSATION_HISTORY_LIMIT * 2 :]
+    # Allow more messages when a summary is present (summary compresses older context)
+    limit = settings.CONVERSATION_HISTORY_LIMIT * 2  # default: 40
+    if messages and "[CONVERSATION_SUMMARY]" in str(messages[0].get("content", "")):
+        limit = settings.CONVERSATION_HISTORY_LIMIT * 3  # with summary: 60
+    trimmed = messages[-limit:]
     _r().setex(
         f"{user_id}:conversation",
         settings.CONVERSATION_TTL_SECONDS,
