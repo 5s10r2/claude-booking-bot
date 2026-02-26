@@ -5,6 +5,7 @@ Connects to the FastAPI /chat endpoint.
 
 import streamlit as st
 import requests
+from config import settings
 
 API_URL = "http://localhost:8000/chat"
 
@@ -58,7 +59,7 @@ with st.sidebar:
     brand_name = st.text_input("Brand Name", value="Rentok", placeholder="e.g. Rentok, OxoTel")
     cities = st.text_input("Cities", value="Bangalore, Mumbai", placeholder="e.g. Bangalore, Mumbai, Delhi")
     areas = st.text_input("Areas", value="Koramangala, Indiranagar, HSR Layout, Whitefield", placeholder="e.g. Koramangala, Indiranagar")
-    kyc_enabled = st.checkbox("KYC Enabled", value=True)
+    kyc_enabled = st.checkbox("KYC Enabled", value=settings.KYC_ENABLED)
 
     with st.expander("WhatsApp Config (optional)"):
         wa_phone_number_id = st.text_input("WhatsApp Phone Number ID", value="")

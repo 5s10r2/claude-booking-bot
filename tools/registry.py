@@ -4,10 +4,24 @@ Each agent picks the tools it needs by name.
 """
 
 from typing import Callable
+from config import settings
 
 # Handler imports (lazy — registered at startup)
 _TOOL_HANDLERS: dict[str, Callable] = {}
 _TOOL_SCHEMAS: dict[str, dict] = {}
+
+_KYC_TOOLS: list[str] = ["fetch_kyc_status", "initiate_kyc", "verify_kyc"]
+_BOOKING_BASE_TOOLS: list[str] = [
+    "save_visit_time",
+    "save_call_time",
+    "create_payment_link",
+    "verify_payment",
+    "check_reserve_bed",
+    "reserve_bed",
+    "cancel_booking",
+    "reschedule_booking",
+]
+
 _AGENT_TOOLS: dict[str, list[str]] = {
     "default": ["brand_info"],
     "broker": [
@@ -21,19 +35,7 @@ _AGENT_TOOLS: dict[str, list[str]] = {
         "fetch_room_details",
         "fetch_properties_by_query",
     ],
-    "booking": [
-        "save_visit_time",
-        "save_call_time",
-        "create_payment_link",
-        "verify_payment",
-        "check_reserve_bed",
-        "reserve_bed",
-        "cancel_booking",
-        "reschedule_booking",
-        "fetch_kyc_status",
-        "initiate_kyc",
-        "verify_kyc",
-    ],
+    "booking": _BOOKING_BASE_TOOLS + (_KYC_TOOLS if settings.KYC_ENABLED else []),
     "profile": [
         "fetch_profile_details",
         "get_scheduled_events",

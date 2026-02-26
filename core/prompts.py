@@ -350,33 +350,7 @@ Step 1: Call check_reserve_bed with property_name
    → If result says already reserved: inform user "This bed is already reserved for you!", ask if they want to schedule a visit/call instead
    → If result says not reserved: proceed to Step 2
 
-Step 2: Call fetch_kyc_status
-   → If result says verified: skip to Step 4
-   → If result says not verified: proceed to Step 3
-
-Step 3: KYC PROCESS
-   a. Ask user for their 12-digit Aadhaar number
-   b. Call initiate_kyc with the aadhar_number
-      → If success: tell user "An OTP has been sent to your registered phone number. Please share it."
-      → If error: ask user to double-check their Aadhaar number and try again
-   c. STOP and wait for user to provide the OTP
-   d. Call verify_kyc with the otp
-      → If verified: tell user "KYC verified successfully!" and proceed to Step 4
-      → If failed: ask user to re-enter the OTP or request a new one
-
-Step 4: PAYMENT
-   a. Call create_payment_link with property_name
-   b. Share the payment link with user: "Please complete the payment using this link: [link from result]"
-   c. STOP HERE — wait for user to come back and confirm they've paid
-   d. When user says they've paid → Call verify_payment
-      → If payment verified: proceed to Step 5
-      → If payment not verified: say "Payment hasn't been received yet. Here's the link again: [link]"
-
-Step 5: RESERVATION
-   a. Call reserve_bed with property_name
-   b. Confirm to user: "Your bed/room at [property name] has been reserved!"
-
-NEVER skip steps. NEVER call reserve_bed without completing KYC AND payment first.
+{kyc_reservation_flow}
 
 CANCELLATION:
 1. Ask which property/booking to cancel
@@ -465,7 +439,12 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
     The special ``language`` kwarg builds and injects the
     ``{language_directive}`` block so every agent prompt gets an explicit
     language instruction.
+
+    The ``{kyc_reservation_flow}`` block is injected automatically based on
+    the ``KYC_ENABLED`` feature flag in settings.
     """
+    from config import settings  # local import to avoid circular dependency
+
     # Build the language directive block
     lang_name = LANGUAGE_NAMES.get(language, "English")
     if language == "en":
@@ -476,6 +455,55 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
 
     # Inject the directive into the template
     prompt_template = prompt_template.replace("{language_directive}", directive)
+
+    # Build and inject the KYC/reservation flow block
+    if settings.KYC_ENABLED:
+        kyc_reservation_flow = (
+            "Step 2: Call fetch_kyc_status\n"
+            "   → If result says verified: skip to Step 4\n"
+            "   → If result says not verified: proceed to Step 3\n"
+            "\n"
+            "Step 3: KYC PROCESS\n"
+            '   a. Ask user for their 12-digit Aadhaar number\n'
+            "   b. Call initiate_kyc with the aadhar_number\n"
+            '      → If success: tell user "An OTP has been sent to your registered phone number. Please share it."\n'
+            "      → If error: ask user to double-check their Aadhaar number and try again\n"
+            "   c. STOP and wait for user to provide the OTP\n"
+            "   d. Call verify_kyc with the otp\n"
+            '      → If verified: tell user "KYC verified successfully!" and proceed to Step 4\n'
+            "      → If failed: ask user to re-enter the OTP or request a new one\n"
+            "\n"
+            "Step 4: PAYMENT\n"
+            "   a. Call create_payment_link with property_name\n"
+            '   b. Share the payment link with user: "Please complete the payment using this link: [link from result]"\n'
+            "   c. STOP HERE — wait for user to come back and confirm they've paid\n"
+            "   d. When user says they've paid → Call verify_payment\n"
+            "      → If payment verified: proceed to Step 5\n"
+            '      → If payment not verified: say "Payment hasn\'t been received yet. Here\'s the link again: [link]"\n'
+            "\n"
+            "Step 5: RESERVATION\n"
+            "   a. Call reserve_bed with property_name\n"
+            '   b. Confirm to user: "Your bed/room at [property name] has been reserved!"\n'
+            "\n"
+            "NEVER skip steps. NEVER call reserve_bed without completing KYC AND payment first."
+        )
+    else:
+        kyc_reservation_flow = (
+            "Step 2: PAYMENT\n"
+            "   a. Call create_payment_link with property_name\n"
+            '   b. Share the payment link with user: "Please complete the payment using this link: [link from result]"\n'
+            "   c. STOP HERE — wait for user to come back and confirm they've paid\n"
+            "   d. When user says they've paid → Call verify_payment\n"
+            "      → If payment verified: proceed to Step 3\n"
+            '      → If payment not verified: say "Payment hasn\'t been received yet. Here\'s the link again: [link]"\n'
+            "\n"
+            "Step 3: RESERVATION\n"
+            "   a. Call reserve_bed with property_name\n"
+            '   b. Confirm to user: "Your bed/room at [property name] has been reserved!"\n'
+            "\n"
+            "NEVER skip steps. NEVER call reserve_bed without completing payment first."
+        )
+    prompt_template = prompt_template.replace("{kyc_reservation_flow}", kyc_reservation_flow)
 
     # Fill remaining parameters
     for key, value in kwargs.items():

@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # API auth (set in .env; if empty, auth is disabled)
     API_KEY: Optional[str] = None
 
+    # Feature flags
+    KYC_ENABLED: bool = False  # Set KYC_ENABLED=true in env to re-enable Aadhaar verification
+
     # Agent settings
     MAX_AGENT_ITERATIONS: int = 15
     CONVERSATION_HISTORY_LIMIT: int = 20
