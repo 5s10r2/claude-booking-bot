@@ -20,6 +20,7 @@ Usage in FastAPI:
         ...
 """
 
+import os
 import time
 from typing import Optional
 
@@ -78,10 +79,13 @@ def _sliding_window_check(
     """
     now = time.time()
     window_start = now - window_seconds
+    # Unique member name — random suffix prevents collisions when
+    # concurrent requests arrive at the same timestamp.
+    member = f"{now}:{os.urandom(4).hex()}"
 
     pipe = _r().pipeline(transaction=True)
     pipe.zremrangebyscore(key, "-inf", window_start)     # prune expired
-    pipe.zadd(key, {f"{now}": now})                       # record this hit
+    pipe.zadd(key, {member: now})                         # record this hit
     pipe.zcard(key)                                       # count in window
     pipe.expire(key, window_seconds + 10)                 # auto-cleanup
     results = pipe.execute()
@@ -89,7 +93,7 @@ def _sliding_window_check(
 
     if count > max_requests:
         # Reject: remove the optimistic add we just did
-        _r().zrem(key, f"{now}")
+        _r().zrem(key, member)
         # Calculate retry_after: oldest entry in window determines when
         # one slot frees up.
         oldest = _r().zrange(key, 0, 0, withscores=True)
