@@ -326,10 +326,10 @@ def get_user_phone(user_id: str) -> Optional[str]:
     stored = _r().get(f"{user_id}:user_phone")
     if stored:
         return stored.decode()
-    # WhatsApp fallback: strip non-digits and take last 10
-    digits = re.sub(r"\D", "", user_id)
-    if len(digits) >= 10:
-        return digits[-10:]
+    # WhatsApp fallback: user_id IS a phone number (pure digits, 10-13 chars)
+    # Web-chat IDs like "uat_k7x2m9qf" contain non-digits → skip fallback
+    if user_id.isdigit() and 10 <= len(user_id) <= 13:
+        return user_id[-10:]
     return None
 
 
