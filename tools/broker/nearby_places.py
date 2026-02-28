@@ -1,6 +1,5 @@
-import httpx
-
 from db.redis_store import get_property_info_map
+from utils.retry import http_get
 
 
 async def fetch_nearby_places(
@@ -35,13 +34,11 @@ async def fetch_nearby_places(
     """
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(
-                "https://overpass-api.de/api/interpreter",
-                params={"data": query},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        data = await http_get(
+            "https://overpass-api.de/api/interpreter",
+            params={"data": query},
+            timeout=20,
+        )
     except Exception as e:
         return f"Error fetching nearby places: {str(e)}"
 

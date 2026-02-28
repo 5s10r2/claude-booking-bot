@@ -16,8 +16,12 @@ from db.redis_store import (
     get_whitelabel_pg_ids,
     save_preferences as redis_save_preferences,
     track_funnel,
+    record_property_viewed,
+    update_user_memory,
+    get_user_memory,
     _r as _redis,
 )
+from utils.scoring import match_score as calc_match_score
 
 
 SEARCH_CACHE_TTL = 900  # 15 minutes
@@ -56,18 +60,19 @@ def _set_search_cache(payload: dict, results: list) -> None:
 
 async def _geocode_location(location: str) -> tuple:
     """Convert a location string to lat/long using Rentok's geocoding API."""
+    from utils.retry import http_post
+
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                f"{settings.RENTOK_API_BASE_URL}/property/getLatLongProperty",
-                json={"address": location},
-            )
-            resp.raise_for_status()
-            data = resp.json().get("data", {}).get("data", {})
-            lat = data.get("lat")
-            lng = data.get("lng")
-            if lat and lng:
-                return float(lat), float(lng)
+        resp_data = await http_post(
+            f"{settings.RENTOK_API_BASE_URL}/property/getLatLongProperty",
+            json={"address": location},
+            timeout=10,
+        )
+        data = resp_data.get("data", {}).get("data", {})
+        lat = data.get("lat")
+        lng = data.get("lng")
+        if lat and lng:
+            return float(lat), float(lng)
     except Exception as e:
         logger.warning("geocode error for '%s': %s", location, e)
     return None, None
@@ -121,29 +126,29 @@ async def _call_search_api(payload: dict) -> list:
     if cached is not None:
         return cached
 
+    from utils.retry import http_post
+
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{settings.RENTOK_API_BASE_URL}/property/getPropertyDetailsAroundLatLong",
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            # Check for inner error (API returns 200 but data.status may be 500)
-            inner = data.get("data", {})
-            if inner.get("status") == 500:
-                logger.error("API inner error: %s — %s", inner.get("message", ""), inner.get("data", {}).get("error", ""))
-                return []
-            results = inner.get("data", {}).get("results", [])
-            logger.info("API response: status=%d, results=%d", resp.status_code, len(results))
+        data = await http_post(
+            f"{settings.RENTOK_API_BASE_URL}/property/getPropertyDetailsAroundLatLong",
+            json=payload,
+            timeout=30,
+        )
+        # Check for inner error (API returns 200 but data.status may be 500)
+        inner = data.get("data", {})
+        if inner.get("status") == 500:
+            logger.error("API inner error: %s — %s", inner.get("message", ""), inner.get("data", {}).get("error", ""))
+            return []
+        results = inner.get("data", {}).get("results", [])
+        logger.info("search API: %d results", len(results))
 
-            # Cache successful non-empty results
-            if results:
-                _set_search_cache(payload, results)
+        # Cache successful non-empty results
+        if results:
+            _set_search_cache(payload, results)
 
-            return results
+        return results
     except Exception as e:
-        logger.error("API error: %s", e)
+        logger.error("search API error: %s", e)
         return []
 
 
@@ -162,8 +167,8 @@ async def _fetch_first_image(client: httpx.AsyncClient, pg_id: str, pg_number: s
         if images:
             first = images[0]
             return first.get("url", first.get("media_id", "")) if isinstance(first, dict) else str(first)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("image fetch failed for pg_id=%s: %s", pg_id, e)
     return ""
 
 
@@ -308,6 +313,31 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     # Geocode top properties to get lat/lng for map view
     await _geocode_properties(properties, limit=5)
 
+    # Re-score with custom scoring (weighted amenities + deal-breaker penalties)
+    user_mem = get_user_memory(user_id)
+    deal_breakers = user_mem.get("deal_breakers", [])
+    scoring_prefs = {
+        "min_budget": min_budget,
+        "max_budget": max_budget,
+        "amenities": amenities,
+        "must_have_amenities": prefs.get("must_have_amenities", ""),
+        "nice_to_have_amenities": prefs.get("nice_to_have_amenities", ""),
+        "property_type": property_type or "",
+        "pg_available_for": pg_available_for or "",
+    }
+    for p in properties:
+        prop_data = {
+            "rent": p.get("p_rent_starts_from", p.get("rent", 0)),
+            "distance": p.get("p_distance", p.get("distance")),
+            "amenities": p.get("p_common_amenities", p.get("p_amenities", "")),
+            "property_type": p.get("p_property_type", ""),
+            "pg_available_for": p.get("p_pg_available_for", ""),
+        }
+        p["_custom_score"] = calc_match_score(prop_data, scoring_prefs, deal_breakers=deal_breakers)
+
+    # Sort by custom score (descending) to surface best matches first
+    properties.sort(key=lambda p: p.get("_custom_score", 0), reverse=True)
+
     existing_map = get_property_info_map(user_id)
     # Build index for fast dedup by prop_id → position in existing_map
     _existing_idx = {}
@@ -344,7 +374,7 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         phone = p.get("p_phone_number", "")
         min_token = p.get("p_min_token_amount", 1000)
         microsite_url = p.get("p_microsite_url", p.get("microsite_url", ""))
-        match_score = p.get("p_match_score", p.get("match_score", ""))
+        match_score = p.get("_custom_score", p.get("p_match_score", p.get("match_score", "")))
         sharing_types_data = p.get("p_sharing_types_enabled", [])
 
         info = {
@@ -389,5 +419,17 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     set_property_info_map(user_id, existing_map)
     save_property_template(user_id, property_template[:5])
     track_funnel(user_id, "search")
+
+    # Update cross-session memory
+    for info in property_template[:5]:
+        record_property_viewed(user_id, info.get("prop_id", ""))
+    budget_str = ""
+    if min_budget or max_budget:
+        budget_str = f"₹{min_budget}-{max_budget}" if min_budget else f"up to ₹{max_budget}"
+    update_user_memory(
+        user_id,
+        last_search_location=location,
+        last_search_budget=budget_str,
+    )
 
     return f"{relaxed_note}Found {len(properties)} properties. Here are the results:\n" + "\n".join(results)

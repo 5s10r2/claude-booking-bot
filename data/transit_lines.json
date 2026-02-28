@@ -1,0 +1,81 @@
+{
+  "_comment": "Major metro/rail lines for Indian cities. avg_speed_kmh = typical station-to-station speed including stops.",
+  "mumbai": {
+    "metro": [
+      {
+        "name": "Mumbai Metro Line 1 (Blue)",
+        "stations": ["Versova", "D N Nagar", "Azad Nagar", "Andheri", "Western Express Highway", "Chakala", "Airport Road", "Marol Naka", "Saki Naka", "Asalpha", "Jagruti Nagar", "Ghatkopar"],
+        "avg_speed_kmh": 33
+      },
+      {
+        "name": "Mumbai Metro Line 2A (Yellow)",
+        "stations": ["Dahisar East", "Anand Nagar", "Poisar", "Eksar", "Borivali West", "Dahanukarwadi", "Kandivali West", "Malad West", "Janki Devi", "Sunder Nagar", "Goregaon West", "Oshiwara", "D N Nagar"],
+        "avg_speed_kmh": 33
+      },
+      {
+        "name": "Mumbai Metro Line 7 (Red)",
+        "stations": ["Dahisar East", "Ovaripada", "Rashtriya Udyan", "Poisar", "Akurli", "Kurar", "Dindoshi", "Aarey", "Goregaon East", "JVLR", "Jogeshwari East", "Mogra", "Gundavali"],
+        "avg_speed_kmh": 33
+      }
+    ],
+    "rail": [
+      {
+        "name": "Western Line",
+        "stations": ["Churchgate", "Marine Lines", "Charni Road", "Grant Road", "Mumbai Central", "Mahalaxmi", "Lower Parel", "Elphinstone Road", "Dadar", "Matunga Road", "Mahim", "Bandra", "Khar Road", "Santacruz", "Vile Parle", "Andheri", "Jogeshwari", "Goregaon", "Malad", "Kandivali", "Borivali", "Dahisar", "Mira Road", "Bhayandar", "Naigaon", "Vasai Road", "Virar"],
+        "avg_speed_kmh": 28
+      },
+      {
+        "name": "Central Line",
+        "stations": ["CSMT", "Masjid", "Sandhurst Road", "Byculla", "Chinchpokli", "Currey Road", "Parel", "Dadar", "Matunga", "Sion", "Kurla", "Vidyavihar", "Ghatkopar", "Vikhroli", "Kanjurmarg", "Bhandup", "Nahur", "Mulund", "Thane", "Kalva", "Dombivli", "Kalyan"],
+        "avg_speed_kmh": 28
+      },
+      {
+        "name": "Harbour Line",
+        "stations": ["CSMT", "Masjid", "Sandhurst Road", "Dockyard Road", "Reay Road", "Cotton Green", "Sewri", "Wadala Road", "GTB Nagar", "Chunabhatti", "Kurla", "Tilak Nagar", "Chembur", "Govandi", "Mankhurd", "Vashi", "Sanpada", "Juinagar", "Nerul", "Seawoods", "CBD Belapur", "Kharghar", "Mansarovar", "Khandeshwar", "Panvel"],
+        "avg_speed_kmh": 25
+      }
+    ]
+  },
+  "bangalore": {
+    "metro": [
+      {
+        "name": "Namma Metro Purple Line",
+        "stations": ["Whitefield", "Kadugodi", "Pattandur Agrahara", "Sri Sathya Sai Hospital", "Nallurhalli", "Kundalahalli", "Sitharama Palya", "Hoodi", "Garudacharpalya", "Singayyanapalya", "KR Pura", "Mahadevapura", "Baiyappanahalli", "Swami Vivekananda Road", "Indiranagar", "Halasuru", "Trinity", "MG Road", "Cubbon Park", "Vidhana Soudha", "Sir M Visvesvaraya", "Majestic", "City Railway Station", "Magadi Road", "Hosahalli", "Vijayanagar", "Attiguppe", "Deepanjali Nagar", "Mysore Road", "Nayandahalli", "Rajarajeshwari Nagar", "Jnanabharathi", "Pattanagere", "Kengeri Bus Terminal", "Kengeri"],
+        "avg_speed_kmh": 34
+      },
+      {
+        "name": "Namma Metro Green Line",
+        "stations": ["Madavara", "Chikkabidarakallu", "Manjunathanagar", "Nagasandra", "Dasarahalli", "Jalahalli", "Peenya Industry", "Peenya", "Goraguntepalya", "Yeshwanthpur", "Sandal Soap Factory", "Mahalakshmi", "Rajajinagar", "Kuvempu Road", "Srirampura", "Sampige Road", "Majestic", "Chickpete", "Krishna Rajendra Market", "National College", "Lalbagh", "South End Circle", "Jayanagar", "Rashtriya Vidyalaya Road", "Banashankari", "JP Nagar", "Yelachenahalli", "Konanakunte Cross", "Doddakallasandra", "Vajarahalli", "Talaghattapura", "Silk Institute"],
+        "avg_speed_kmh": 34
+      }
+    ]
+  },
+  "delhi": {
+    "metro": [
+      {
+        "name": "Delhi Metro Blue Line",
+        "stations": ["Dwarka Sector 21", "Dwarka Sector 8", "Dwarka Sector 9", "Dwarka Sector 10", "Dwarka Sector 11", "Dwarka Sector 12", "Dwarka Sector 13", "Dwarka Sector 14", "Dwarka", "Dwarka Mor", "Nawada", "Uttam Nagar West", "Uttam Nagar East", "Janakpuri West", "Janakpuri East", "Tilak Nagar", "Subhash Nagar", "Tagore Garden", "Rajouri Garden", "Ramesh Nagar", "Moti Nagar", "Kirti Nagar", "Shadipur", "Patel Nagar", "Rajendra Place", "Karol Bagh", "Jhandewalan", "Ramakrishna Ashram Marg", "Rajiv Chowk", "Barakhamba Road", "Mandi House", "Pragati Maidan", "Indraprastha", "Yamuna Bank", "Akshardham", "Mayur Vihar I", "Mayur Vihar Extension", "New Ashok Nagar", "Noida Sector 15", "Noida Sector 16", "Noida Sector 18", "Botanical Garden", "Golf Course", "Noida City Centre", "Noida Sector 34", "Noida Sector 52", "Noida Sector 61", "Noida Sector 59", "Noida Sector 62", "Noida Electronic City"],
+        "avg_speed_kmh": 34
+      },
+      {
+        "name": "Delhi Metro Yellow Line",
+        "stations": ["Samaypur Badli", "Rohini Sector 18-19", "Haiderpur Badli Mor", "Jahangirpuri", "Adarsh Nagar", "Azadpur", "Model Town", "GTB Nagar", "Vishwa Vidyalaya", "Vidhan Sabha", "Civil Lines", "Kashmere Gate", "Chandni Chowk", "Chawri Bazar", "New Delhi", "Rajiv Chowk", "Patel Chowk", "Central Secretariat", "Udyog Bhawan", "Lok Kalyan Marg", "Jor Bagh", "INA", "AIIMS", "Green Park", "Hauz Khas", "Malviya Nagar", "Saket", "Qutub Minar", "Chhatarpur", "Sultanpur", "Ghitorni", "Arjan Garh", "Guru Dronacharya", "Sikandarpur", "MG Road", "IFFCO Chowk", "HUDA City Centre"],
+        "avg_speed_kmh": 34
+      }
+    ]
+  },
+  "pune": {
+    "metro": [
+      {
+        "name": "Pune Metro Purple Line",
+        "stations": ["PCMC", "Sant Tukaram Nagar", "Bhosari", "Kasarwadi", "Phugewadi", "Dapodi", "Bopodi", "Khadki", "Range Hills", "Shivajinagar", "Civil Court", "Budhwar Peth", "Mandai", "Swargate"],
+        "avg_speed_kmh": 33
+      },
+      {
+        "name": "Pune Metro Aqua Line",
+        "stations": ["Vanaz", "Anand Nagar", "Ideal Colony", "Nal Stop", "Garware College", "Deccan Gymkhana", "Chhatrapati Sambhaji Udyan", "PMC", "Civil Court", "Mangalwar Peth", "Pune Railway Station", "Ruby Hall Clinic", "Bund Garden", "Yerawada", "Kalyani Nagar", "Ramwadi"],
+        "avg_speed_kmh": 33
+      }
+    ]
+  }
+}

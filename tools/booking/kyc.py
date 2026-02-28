@@ -3,7 +3,10 @@ import re
 import httpx
 
 from config import settings
+from core.log import get_logger
 from db.redis_store import set_aadhar_user_name, set_aadhar_gender, get_user_phone
+
+logger = get_logger("tools.kyc")
 
 
 async def fetch_kyc_status(user_id: str, **kwargs) -> str:
@@ -14,8 +17,8 @@ async def fetch_kyc_status(user_id: str, **kwargs) -> str:
             await client.get(
                 f"{settings.RENTOK_API_BASE_URL}/bookingBotKyc/user-kyc/{user_id}"
             )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("KYC init failed for user=%s: %s", user_id, e)
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -92,8 +95,8 @@ async def verify_kyc(user_id: str, otp: str, **kwargs) -> str:
                 f"{settings.RENTOK_API_BASE_URL}/bookingBotKyc/update-kyc",
                 json={"user_id": user_id, "kyc_data": kyc_data},
             )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("KYC update failed for user=%s: %s", user_id, e)
 
     # Store Aadhaar name and gender in Redis
     name = kyc_data.get("name", "")

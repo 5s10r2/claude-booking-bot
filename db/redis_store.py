@@ -510,3 +510,360 @@ def get_funnel(day: str = None) -> dict:
         day = date.today().isoformat()
     raw = _r().hgetall(f"funnel:{day}")
     return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
+
+
+# ---------------------------------------------------------------------------
+# Cross-session user memory (persistent — no TTL)
+# ---------------------------------------------------------------------------
+
+_MEMORY_DEFAULTS = {
+    "first_seen": "",
+    "last_seen": "",
+    "session_count": 0,
+    "properties_viewed": [],       # list of prop_ids
+    "properties_shortlisted": [],  # list of prop_ids
+    "properties_rejected": [],     # list of {"prop_id": ..., "traits": [...]}
+    "visits_scheduled": [],        # list of prop_ids
+    "deal_breakers": [],           # inferred: ["no AC", "far from metro"]
+    "must_haves": [],              # inferred: ["AC", "WiFi"]
+    "lead_score": 0,
+    "last_search_location": "",
+    "last_search_budget": "",
+    "phone_collected": False,
+    "funnel_max": "",              # highest funnel stage reached
+    "persona": "",                 # "professional", "student", "family", or ""
+}
+
+# ---------------------------------------------------------------------------
+# Persona detection keywords
+# ---------------------------------------------------------------------------
+_PERSONA_SIGNALS = {
+    "professional": [
+        "office", "work", "workplace", "company", "commute", "job",
+        "corporate", "business park", "tech park", "it park", "bkc",
+        "salary", "professional",
+    ],
+    "student": [
+        "college", "university", "campus", "studies", "student",
+        "hostel", "studying", "course", "engineering", "medical",
+        "iit", "nit", "bits", "vit", "manipal", "amity",
+    ],
+    "family": [
+        "family", "kids", "children", "school", "wife", "husband",
+        "spouse", "parents", "daughter", "son", "married",
+    ],
+}
+
+
+def detect_persona(text: str) -> str:
+    """Detect user persona from conversation text. Returns persona string or empty."""
+    lower = text.lower()
+    scores = {"professional": 0, "student": 0, "family": 0}
+    for persona, keywords in _PERSONA_SIGNALS.items():
+        for kw in keywords:
+            if kw in lower:
+                scores[persona] += 1
+    best = max(scores, key=scores.get)
+    return best if scores[best] >= 1 else ""
+
+
+def update_persona(user_id: str, text: str) -> str:
+    """Detect persona from text and persist if found (doesn't downgrade existing)."""
+    detected = detect_persona(text)
+    if not detected:
+        return ""
+    mem = get_user_memory(user_id)
+    current = mem.get("persona", "")
+    if not current:
+        update_user_memory(user_id, persona=detected)
+    return detected or current
+
+FUNNEL_ORDER = ("search", "detail", "shortlist", "visit", "booking")
+
+
+def get_user_memory(user_id: str) -> dict:
+    """Return persistent cross-session memory for a user."""
+    data = _json_get(f"{user_id}:user_memory")
+    if data is None:
+        return dict(_MEMORY_DEFAULTS)
+    # Ensure all keys exist (forward compat if we add new fields)
+    merged = dict(_MEMORY_DEFAULTS)
+    merged.update(data)
+    return merged
+
+
+def save_user_memory(user_id: str, memory: dict) -> None:
+    """Persist user memory (no TTL — survives across sessions)."""
+    _json_set(f"{user_id}:user_memory", memory)
+
+
+def update_user_memory(user_id: str, **updates) -> dict:
+    """Merge updates into existing memory, recalculate lead score, and save.
+
+    Convenience wrapper: ``update_user_memory(uid, session_count=mem["session_count"]+1)``
+    """
+    mem = get_user_memory(user_id)
+    mem.update(updates)
+
+    # Always refresh last_seen
+    from datetime import date
+    mem["last_seen"] = date.today().isoformat()
+    if not mem["first_seen"]:
+        mem["first_seen"] = mem["last_seen"]
+
+    # Recalculate lead score
+    mem["lead_score"] = _calculate_lead_score(mem)
+
+    # Update funnel_max
+    for stage in reversed(FUNNEL_ORDER):
+        if stage == "visit" and mem.get("visits_scheduled"):
+            mem["funnel_max"] = _max_funnel(mem.get("funnel_max", ""), "visit")
+        elif stage == "shortlist" and mem.get("properties_shortlisted"):
+            mem["funnel_max"] = _max_funnel(mem.get("funnel_max", ""), "shortlist")
+        elif stage == "search" and mem.get("properties_viewed"):
+            mem["funnel_max"] = _max_funnel(mem.get("funnel_max", ""), "search")
+
+    save_user_memory(user_id, mem)
+    return mem
+
+
+def _max_funnel(current: str, new: str) -> str:
+    """Return the deeper funnel stage."""
+    cur_idx = FUNNEL_ORDER.index(current) if current in FUNNEL_ORDER else -1
+    new_idx = FUNNEL_ORDER.index(new) if new in FUNNEL_ORDER else -1
+    return FUNNEL_ORDER[max(cur_idx, new_idx)] if max(cur_idx, new_idx) >= 0 else current
+
+
+def _calculate_lead_score(mem: dict) -> int:
+    """Score 0-100 based on engagement signals. Higher = hotter lead."""
+    score = 0
+
+    # Session engagement (max 20)
+    score += min(20, mem.get("session_count", 0) * 5)
+
+    # Properties explored (max 15)
+    score += min(15, len(mem.get("properties_viewed", [])) * 2)
+
+    # Shortlisted (max 15)
+    score += min(15, len(mem.get("properties_shortlisted", [])) * 5)
+
+    # Visits scheduled (max 20)
+    score += min(20, len(mem.get("visits_scheduled", [])) * 10)
+
+    # Phone collected (10)
+    if mem.get("phone_collected"):
+        score += 10
+
+    # Preferences completeness (max 10)
+    loc = mem.get("last_search_location", "")
+    budget = mem.get("last_search_budget", "")
+    if loc:
+        score += 5
+    if budget:
+        score += 5
+
+    # Recency decay: -5 per week of inactivity (max -20)
+    last_seen = mem.get("last_seen", "")
+    if last_seen:
+        from datetime import date
+        try:
+            days_inactive = (date.today() - date.fromisoformat(last_seen)).days
+            weeks_inactive = days_inactive // 7
+            score -= min(20, weeks_inactive * 5)
+        except (ValueError, TypeError):
+            pass
+
+    return max(0, min(100, score))
+
+
+def get_lead_temperature(score: int) -> str:
+    """Classify lead score into temperature."""
+    if score >= 70:
+        return "hot"
+    if score >= 40:
+        return "warm"
+    return "cold"
+
+
+def record_property_viewed(user_id: str, prop_id: str) -> None:
+    """Record that user viewed/was shown a property."""
+    if not prop_id:
+        return
+    mem = get_user_memory(user_id)
+    viewed = mem.get("properties_viewed", [])
+    if prop_id not in viewed:
+        viewed.append(prop_id)
+        mem["properties_viewed"] = viewed[-50:]  # cap at 50
+    update_user_memory(user_id, properties_viewed=mem["properties_viewed"])
+
+
+def record_property_shortlisted(user_id: str, prop_id: str) -> None:
+    """Record that user shortlisted a property."""
+    if not prop_id:
+        return
+    mem = get_user_memory(user_id)
+    shortlisted = mem.get("properties_shortlisted", [])
+    if prop_id not in shortlisted:
+        shortlisted.append(prop_id)
+        mem["properties_shortlisted"] = shortlisted[-20:]
+    update_user_memory(user_id, properties_shortlisted=mem["properties_shortlisted"])
+
+
+def record_visit_scheduled(user_id: str, prop_id: str) -> None:
+    """Record that user scheduled a visit."""
+    if not prop_id:
+        return
+    mem = get_user_memory(user_id)
+    visits = mem.get("visits_scheduled", [])
+    if prop_id not in visits:
+        visits.append(prop_id)
+        mem["visits_scheduled"] = visits[-20:]
+    update_user_memory(user_id, visits_scheduled=mem["visits_scheduled"])
+
+
+def add_deal_breaker(user_id: str, deal_breaker: str) -> None:
+    """Add an inferred deal-breaker (e.g., 'no AC')."""
+    if not deal_breaker:
+        return
+    mem = get_user_memory(user_id)
+    dbs = mem.get("deal_breakers", [])
+    if deal_breaker.lower() not in [d.lower() for d in dbs]:
+        dbs.append(deal_breaker)
+        mem["deal_breakers"] = dbs[-10:]  # cap at 10
+    save_user_memory(user_id, mem)
+
+
+def build_returning_user_context(user_id: str) -> str:
+    """Build a prompt-injectable summary of the returning user's history.
+
+    Returns empty string for new users (no memory).
+    """
+    mem = get_user_memory(user_id)
+    if not mem.get("first_seen") or mem.get("session_count", 0) < 1:
+        return ""
+
+    parts = []
+    parts.append(f"RETURNING USER (session #{mem['session_count'] + 1}):")
+
+    loc = mem.get("last_search_location", "")
+    budget = mem.get("last_search_budget", "")
+    if loc:
+        search_info = f"Last searched: {loc}"
+        if budget:
+            search_info += f", budget {budget}"
+        parts.append(search_info)
+
+    n_viewed = len(mem.get("properties_viewed", []))
+    n_short = len(mem.get("properties_shortlisted", []))
+    n_visits = len(mem.get("visits_scheduled", []))
+    if n_viewed or n_short or n_visits:
+        engagement = []
+        if n_viewed:
+            engagement.append(f"{n_viewed} viewed")
+        if n_short:
+            engagement.append(f"{n_short} shortlisted")
+        if n_visits:
+            engagement.append(f"{n_visits} visits scheduled")
+        parts.append("Properties: " + ", ".join(engagement))
+
+    persona = mem.get("persona", "")
+    if persona:
+        parts.append(f"Persona: {persona}")
+
+    dbs = mem.get("deal_breakers", [])
+    if dbs:
+        parts.append(f"Deal-breakers: {', '.join(dbs)}")
+
+    must = mem.get("must_haves", [])
+    if must:
+        parts.append(f"Must-haves: {', '.join(must)}")
+
+    score = mem.get("lead_score", 0)
+    temp = get_lead_temperature(score)
+    parts.append(f"Lead: {temp} ({score}/100)")
+
+    if temp == "hot":
+        parts.append("→ Use urgency and push for booking/visit NOW")
+    elif temp == "warm":
+        parts.append("→ Engage warmly, highlight new options, nudge toward action")
+    else:
+        parts.append("→ Be educational, build trust, don't push too hard")
+
+    if loc and budget:
+        parts.append("→ Skip qualifying questions — go straight to search or pick up where they left off")
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Proactive follow-up system (sorted set based)
+# ---------------------------------------------------------------------------
+
+FOLLOWUP_KEY = "followups"
+
+
+def schedule_followup(
+    user_id: str,
+    followup_type: str,
+    data: dict,
+    delay_seconds: int,
+) -> None:
+    """Schedule a follow-up message to be sent after a delay.
+
+    Args:
+        user_id: The user to follow up with.
+        followup_type: One of "visit_complete", "payment_pending", "shortlist_idle".
+        data: Context dict (property_name, property_id, etc.).
+        delay_seconds: Seconds from now to trigger.
+    """
+    import time as _time
+    trigger_at = _time.time() + delay_seconds
+    member = json.dumps({
+        "user_id": user_id,
+        "type": followup_type,
+        "data": data,
+        "scheduled_at": _time.time(),
+    }, default=str)
+    _r().zadd(FOLLOWUP_KEY, {member: trigger_at})
+
+
+def get_due_followups(limit: int = 50) -> list[dict]:
+    """Return follow-ups whose trigger time has passed (ready to send)."""
+    import time as _time
+    now = _time.time()
+    raw_members = _r().zrangebyscore(FOLLOWUP_KEY, "-inf", now, start=0, num=limit)
+    results = []
+    for raw in raw_members:
+        try:
+            entry = json.loads(raw if isinstance(raw, str) else raw.decode())
+            entry["_raw"] = raw  # keep original for removal
+            results.append(entry)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Corrupt entry — remove it
+            _r().zrem(FOLLOWUP_KEY, raw)
+    return results
+
+
+def complete_followup(raw_member) -> None:
+    """Remove a processed follow-up from the sorted set."""
+    _r().zrem(FOLLOWUP_KEY, raw_member)
+
+
+def cancel_followups(user_id: str, followup_type: str = "") -> int:
+    """Cancel pending follow-ups for a user (optionally filtered by type).
+
+    Returns number of cancelled follow-ups.
+    """
+    # Scan all members and remove matching ones
+    all_members = _r().zrange(FOLLOWUP_KEY, 0, -1)
+    removed = 0
+    for raw in all_members:
+        try:
+            entry = json.loads(raw if isinstance(raw, str) else raw.decode())
+            if entry.get("user_id") == user_id:
+                if not followup_type or entry.get("type") == followup_type:
+                    _r().zrem(FOLLOWUP_KEY, raw)
+                    removed += 1
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+    return removed

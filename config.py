@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # Rentok API
     RENTOK_API_BASE_URL: str = "https://apiv2.rentok.com"
 
+    # OSRM (map distance service)
+    OSRM_API_KEY: str = "f34519d734a599611aece8b96810d122"
+
     # WhatsApp (defaults from env, not hardcoded tokens)
     WHATSAPP_ACCESS_TOKEN: Optional[str] = None
     WHATSAPP_VERIFY_TOKEN: str = "booking-bot-verify"
@@ -33,6 +36,10 @@ class Settings(BaseSettings):
 
     # API auth (set in .env; if empty, auth is disabled)
     API_KEY: Optional[str] = None
+
+    # Web Intelligence
+    TAVILY_API_KEY: Optional[str] = None  # Tavily search API key for web intelligence
+    WEB_SEARCH_MAX_PER_CONVERSATION: int = 3  # max web searches per conversation
 
     # Feature flags
     KYC_ENABLED: bool = False  # Set KYC_ENABLED=true in env to re-enable Aadhaar verification

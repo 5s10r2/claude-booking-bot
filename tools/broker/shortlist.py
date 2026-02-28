@@ -1,7 +1,10 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map, get_whitelabel_pg_ids, track_funnel, get_user_phone
+from db.redis_store import get_property_info_map, get_whitelabel_pg_ids, track_funnel, get_user_phone, record_property_shortlisted, schedule_followup
+from core.log import get_logger
+
+logger = get_logger("tools.shortlist")
 
 
 async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
@@ -41,4 +44,15 @@ async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
         return f"Error shortlisting property: {str(e)}"
 
     track_funnel(user_id, "shortlist")
+    record_property_shortlisted(user_id, prop_id)
+
+    # Schedule follow-up: 48h after shortlisting (only if no visit scheduled)
+    try:
+        schedule_followup(user_id, "shortlist_idle", {
+            "property_name": prop.get("property_name", property_name),
+            "property_id": str(prop_id),
+        }, 172800)  # 48 hours
+    except Exception as e:
+        logger.warning("shortlist follow-up scheduling failed: %s", e)
+
     return f"Property '{prop.get('property_name', property_name)}' has been shortlisted successfully."

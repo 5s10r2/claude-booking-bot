@@ -13,7 +13,6 @@ Endpoints:
 
 import json
 import hashlib
-import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -24,6 +23,7 @@ from fastapi.security import APIKeyHeader
 from core.log import get_logger
 from core.rate_limiter import check_rate_limit, RateLimitExceeded
 from core.language import detect_language
+from core.router import apply_keyword_safety_net
 
 logger = get_logger("main")
 from pydantic import BaseModel
@@ -48,7 +48,6 @@ from db.redis_store import (
     clear_no_message,
     store_vectorstore_in_redis,
     get_file_hash,
-    get_last_agent,
     set_last_agent,
     save_feedback,
     get_feedback_counts,
@@ -58,6 +57,9 @@ from db.redis_store import (
     get_user_language,
     track_agent_usage,
     get_agent_usage,
+    get_user_memory,
+    update_user_memory,
+    get_user_phone,
 )
 from agents import supervisor, default_agent, broker_agent, booking_agent, profile_agent, room_agent
 from channels.whatsapp import send_text, send_carousel, send_images
@@ -154,6 +156,19 @@ class ChatResponse(BaseModel):
 
 async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     """Run the full supervisor → agent pipeline. Returns (response, agent_name, language)."""
+    # Update cross-session memory (only bump session_count on first message of a session)
+    mem = get_user_memory(user_id)
+    updates = {"phone_collected": bool(get_user_phone(user_id))}
+    # Conversation history is empty on first message → new session
+    from db.redis_store import get_conversation
+    if not get_conversation(user_id):
+        updates["session_count"] = mem.get("session_count", 0) + 1
+    update_user_memory(user_id, **updates)
+
+    # Detect and persist persona from user message (non-blocking)
+    from db.redis_store import update_persona
+    update_persona(user_id, message)
+
     # Detect language from message
     detected_lang = detect_language(message)
     stored_lang = get_user_language(user_id)
@@ -168,109 +183,7 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     agent_name = await supervisor.route(engine, messages)
 
     # Safety net: keyword-based override if supervisor misclassifies
-    #
-    # Design: 3 layers, each more permissive:
-    #   Phase 1 — Multi-word phrases (resolve ambiguous words by context)
-    #   Phase 2 — Single words (word-boundary matching, not substring)
-    #   Phase 3 — Last-agent fallback for continuations
-    #
-    # Key insight: the same root word can mean different things:
-    #   "shortlist this property" (ACTION → broker) vs "show shortlisted" (QUERY → profile)
-    #   "schedule a visit" (ACTION → booking) vs "my visits" (QUERY → profile)
-    # Phrases in Phase 1 disambiguate; Phase 2 handles the unambiguous remainder.
-
-    msg_lower = message.lower()
-    if agent_name == "default":
-        # Normalize: strip punctuation so word matching works on "PG!" → "pg"
-        msg_clean = re.sub(r"[^\w\s-]", " ", msg_lower)
-        words = set(msg_clean.split())
-
-        # --- Phase 1: Multi-word phrases (highest confidence) ---
-        # These resolve words that are ambiguous at the single-word level.
-        profile_phrases = [
-            "my visit", "my visits", "my booking", "my bookings",
-            "my schedule", "my event", "my events",
-            "my preference", "my preferences", "my profile",
-            "shortlisted propert", "saved propert",
-            "booking status", "visit status", "scheduled event",
-        ]
-        broker_phrases = [
-            "more about", "tell me about",
-            "details of", "details about", "details for",
-            "images of", "photos of", "pictures of",
-            "far from", "distance from", "distance to",
-            "shortlist this", "shortlist the",
-        ]
-        # (No booking phrases needed — booking actions are unambiguous
-        #  at the single-word level: "cancel", "reschedule", "kyc", etc.)
-
-        if any(p in msg_lower for p in profile_phrases):
-            agent_name = "profile"
-        elif any(p in msg_lower for p in broker_phrases):
-            agent_name = "broker"
-        else:
-            # --- Phase 2: Single-word matching (word boundary, not substring) ---
-            # Profile: informational/query words — "show me my X"
-            # Note: plurals ("visits", "bookings") imply listing = profile
-            profile_words = {
-                "profile", "preference", "preferences", "upcoming",
-                "events", "visits", "bookings", "shortlisted",
-            }
-            # Booking: action words — "do X"
-            booking_words = {
-                "visit", "schedule", "book", "appointment", "call", "video",
-                "tour", "payment", "pay", "token", "kyc", "aadhaar", "otp",
-                "reserve", "cancel", "reschedule",
-            }
-            # Broker: property exploration (broadest — checked last)
-            broker_words = {
-                "find", "search", "looking", "property", "properties",
-                "pg", "flat", "apartment", "hostel", "coliving", "co-living",
-                "room", "rent", "budget", "area", "location", "available",
-                "recommend", "suggest", "bhk", "1bhk", "2bhk", "rk",
-                "single", "double", "girls", "boys", "sharing",
-                "place", "stay", "accommodation", "housing", "near", "nearby",
-                "shortlist", "details", "images", "photos",
-                "landmark", "landmarks", "distance", "far",
-                # Hindi/Hinglish
-                "kamra", "kiraya", "ghar", "chahiye", "dikhao", "jagah", "rehne",
-                # Marathi
-                "खोली", "भाडे", "जागा", "पाहिजे", "दाखवा", "शोधा", "बुकिंग",
-            }
-
-            if words & profile_words:
-                agent_name = "profile"
-            elif words & booking_words:
-                agent_name = "booking"
-            elif words & broker_words:
-                agent_name = "broker"
-
-    # --- Phase 3: Last-agent fallback for continuations ---
-    # Catches affirmatives ("yes", "ok", "haan") and very short follow-ups
-    # (≤5 words) that don't contain question/greeting words.
-    # Longer follow-ups should be caught by the improved phrase/keyword
-    # matching in Phases 1-2 instead.
-    if agent_name == "default":
-        last = get_last_agent(user_id)
-        if last and last != "default":
-            affirmatives = {
-                "yes", "ok", "okay", "sure", "go ahead", "please",
-                "yeah", "yep", "yup", "haan", "ha", "theek hai",
-                "kar do", "ho jayega", "confirm", "done", "proceed",
-                # Marathi
-                "हो", "चालेल", "ठीक आहे",
-            }
-            # Words that signal a NEW intent (not a continuation)
-            new_intent_words = {
-                "hello", "hi", "hey", "howdy", "namaste",
-                "thanks", "thank", "bye", "goodbye",
-                "what", "who", "where", "when", "how", "why", "which",
-            }
-            msg_stripped = msg_lower.strip().rstrip(".!,?")
-            is_new_intent = bool(words & new_intent_words)
-            if msg_stripped in affirmatives or (len(message.split()) <= 5 and not is_new_intent):
-                agent_name = last
-                logger.debug("last_agent fallback → %s", last)
+    agent_name = apply_keyword_safety_net(agent_name, message, user_id)
 
     logger.info("user=%s agent=%s lang=%s msg=%s", user_id, agent_name, language, message[:60])
 
@@ -376,82 +289,8 @@ async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict], str
 
     agent_name = await supervisor.route(engine, messages)
 
-    # --- keyword safety net (same logic as run_pipeline) ---
-    msg_lower = message.lower()
-    if agent_name == "default":
-        msg_clean = re.sub(r"[^\w\s-]", " ", msg_lower)
-        words = set(msg_clean.split())
-
-        profile_phrases = [
-            "my visit", "my visits", "my booking", "my bookings",
-            "my schedule", "my event", "my events",
-            "my preference", "my preferences", "my profile",
-            "shortlisted propert", "saved propert",
-            "booking status", "visit status", "scheduled event",
-        ]
-        broker_phrases = [
-            "more about", "tell me about",
-            "details of", "details about", "details for",
-            "images of", "photos of", "pictures of",
-            "far from", "distance from", "distance to",
-            "shortlist this", "shortlist the",
-        ]
-
-        if any(p in msg_lower for p in profile_phrases):
-            agent_name = "profile"
-        elif any(p in msg_lower for p in broker_phrases):
-            agent_name = "broker"
-        else:
-            profile_words = {
-                "profile", "preference", "preferences", "upcoming",
-                "events", "visits", "bookings", "shortlisted",
-            }
-            booking_words = {
-                "visit", "schedule", "book", "appointment", "call", "video",
-                "tour", "payment", "pay", "token", "kyc", "aadhaar", "otp",
-                "reserve", "cancel", "reschedule",
-            }
-            broker_words = {
-                "find", "search", "looking", "property", "properties",
-                "pg", "flat", "apartment", "hostel", "coliving", "co-living",
-                "room", "rent", "budget", "area", "location", "available",
-                "recommend", "suggest", "bhk", "1bhk", "2bhk", "rk",
-                "single", "double", "girls", "boys", "sharing",
-                "place", "stay", "accommodation", "housing", "near", "nearby",
-                "shortlist", "details", "images", "photos",
-                "landmark", "landmarks", "distance", "far",
-                "kamra", "kiraya", "ghar", "chahiye", "dikhao", "jagah", "rehne",
-                # Marathi
-                "खोली", "भाडे", "जागा", "पाहिजे", "दाखवा", "शोधा", "बुकिंग",
-            }
-
-            if words & profile_words:
-                agent_name = "profile"
-            elif words & booking_words:
-                agent_name = "booking"
-            elif words & broker_words:
-                agent_name = "broker"
-
-    if agent_name == "default":
-        last = get_last_agent(user_id)
-        if last and last != "default":
-            affirmatives = {
-                "yes", "ok", "okay", "sure", "go ahead", "please",
-                "yeah", "yep", "yup", "haan", "ha", "theek hai",
-                "kar do", "ho jayega", "confirm", "done", "proceed",
-                # Marathi
-                "हो", "चालेल", "ठीक आहे",
-            }
-            new_intent_words = {
-                "hello", "hi", "hey", "howdy", "namaste",
-                "thanks", "thank", "bye", "goodbye",
-                "what", "who", "where", "when", "how", "why", "which",
-            }
-            msg_stripped = msg_lower.strip().rstrip(".!,?")
-            is_new_intent = bool(words & new_intent_words)
-            if msg_stripped in affirmatives or (len(message.split()) <= 5 and not is_new_intent):
-                agent_name = last
-                logger.debug("last_agent fallback → %s", last)
+    # Safety net: keyword-based override if supervisor misclassifies
+    agent_name = apply_keyword_safety_net(agent_name, message, user_id)
 
     # Track agent usage for analytics
     track_agent_usage(user_id, agent_name)
@@ -914,8 +753,8 @@ async def admin_analytics(time_range: str = "7d"):
     rate_limits = {}
     try:
         rate_limits = get_rate_limit_status("__global__")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("rate limit status fetch failed: %s", e)
 
     return {
         "funnel": funnel_totals,
@@ -927,6 +766,104 @@ async def admin_analytics(time_range: str = "7d"):
             "range": time_range,
             "generated_at": datetime.utcnow().isoformat(),
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Proactive follow-up cron
+# ---------------------------------------------------------------------------
+
+@app.post("/cron/follow-ups", dependencies=[Depends(verify_api_key)])
+async def process_followups():
+    """Process due follow-ups. Call this endpoint via an external cron (every 15 min)."""
+    from db.redis_store import get_due_followups, complete_followup, get_user_memory
+
+    followups = get_due_followups(limit=50)
+    processed = 0
+    errors = 0
+
+    for entry in followups:
+        user_id = entry.get("user_id", "")
+        ftype = entry.get("type", "")
+        data = entry.get("data", {})
+        raw = entry.get("_raw")
+
+        if not user_id:
+            complete_followup(raw)
+            continue
+
+        prop_name = data.get("property_name", "your shortlisted property")
+
+        try:
+            if ftype == "visit_complete":
+                message = (
+                    f"Hey! How was your visit to {prop_name}? 🏠\n\n"
+                    "Quick feedback:\n"
+                    "1️⃣ Loved it — I want to book!\n"
+                    "2️⃣ It was okay\n"
+                    "3️⃣ Not for me\n\n"
+                    "Just reply with 1, 2, or 3 and I'll take it from there!"
+                )
+            elif ftype == "payment_pending":
+                link = data.get("link", "")
+                amount = data.get("amount", "")
+                message = (
+                    f"Just a friendly reminder — your payment link for {prop_name} "
+                    f"is still active (₹{amount}).\n\n"
+                    f"{link}\n\n"
+                    "Complete it to lock in your reservation. "
+                    "Let me know if you have any questions!"
+                )
+            elif ftype == "shortlist_idle":
+                mem = get_user_memory(user_id)
+                n_shortlisted = len(mem.get("properties_shortlisted", []))
+                message = (
+                    f"Hey! You shortlisted {prop_name} a couple of days ago. "
+                    f"Still interested? 🤔\n\n"
+                )
+                if n_shortlisted > 1:
+                    message += (
+                        f"You have {n_shortlisted} properties shortlisted. "
+                        "Want me to compare them or schedule a visit to your top pick?"
+                    )
+                else:
+                    message += (
+                        "Want me to show you more details, schedule a visit, "
+                        "or look for other options nearby?"
+                    )
+            else:
+                complete_followup(raw)
+                continue
+
+            # Send via appropriate channel
+            # Check if user is a WhatsApp user (phone-based ID)
+            if user_id.isdigit() and 10 <= len(user_id) <= 13:
+                account = get_account_values(user_id)
+                if account.get("whatsapp_phone_number_id"):
+                    await send_text(user_id, message)
+                    processed += 1
+                else:
+                    logger.info("follow-up skipped (no WA config): user=%s type=%s", user_id, ftype)
+            else:
+                # Web chat user — store message for next session retrieval
+                from db.redis_store import save_conversation, get_conversation
+                conv = get_conversation(user_id)
+                conv.append({"role": "assistant", "content": f"[FOLLOW_UP] {message}"})
+                save_conversation(user_id, conv)
+                processed += 1
+
+            complete_followup(raw)
+
+        except Exception as e:
+            logger.error("follow-up processing failed: user=%s type=%s error=%s", user_id, ftype, e)
+            errors += 1
+            # Don't remove — will be retried on next cron run
+
+    return {
+        "status": "ok",
+        "processed": processed,
+        "errors": errors,
+        "pending": len(followups) - processed - errors,
     }
 
 

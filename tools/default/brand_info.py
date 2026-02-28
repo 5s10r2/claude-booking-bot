@@ -1,7 +1,13 @@
+import hashlib
 import httpx
 
 from config import settings
-from db.redis_store import get_whitelabel_pg_ids
+from db.redis_store import get_whitelabel_pg_ids, _json_get, _json_set
+from core.log import get_logger
+
+logger = get_logger("tools.brand_info")
+
+_BRAND_CACHE_TTL = 86400  # 24 hours
 
 
 async def brand_info(user_id: str, **kwargs) -> str:
@@ -11,6 +17,14 @@ async def brand_info(user_id: str, **kwargs) -> str:
 
     pg_ids_str = ",".join(str(p) for p in pg_ids) if isinstance(pg_ids, list) else str(pg_ids)
 
+    # --- Check cache first ---
+    cache_key = f"brand_info:{hashlib.md5(pg_ids_str.encode()).hexdigest()}"
+    cached = _json_get(cache_key)
+    if cached:
+        logger.debug("brand_info cache hit for pg_ids=%s", pg_ids_str)
+        return cached
+
+    # --- Cache miss → fetch from API ---
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
@@ -20,6 +34,7 @@ async def brand_info(user_id: str, **kwargs) -> str:
             resp.raise_for_status()
             data = resp.json().get("data", {})
     except Exception as e:
+        logger.warning("brand_info API failed: %s", e)
         return f"Error fetching brand info: {str(e)}"
 
     if not data:
@@ -52,4 +67,13 @@ async def brand_info(user_id: str, **kwargs) -> str:
     if data.get("address"):
         lines.append(f"- Address: {data['address']}")
 
-    return "\n".join(lines)
+    result = "\n".join(lines)
+
+    # --- Cache the result ---
+    try:
+        _json_set(cache_key, result, ex=_BRAND_CACHE_TTL)
+        logger.debug("brand_info cached for pg_ids=%s (24h TTL)", pg_ids_str)
+    except Exception as e:
+        logger.warning("brand_info cache write failed: %s", e)
+
+    return result

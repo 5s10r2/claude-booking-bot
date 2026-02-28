@@ -1,8 +1,12 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map, get_account_values, track_funnel, get_user_phone, get_aadhar_user_name
+from core.log import get_logger
+from db.redis_store import get_property_info_map, get_account_values, track_funnel, get_user_phone, get_aadhar_user_name, record_visit_scheduled, schedule_followup
 from utils.date import transcribe_date
+from utils.retry import http_post
+
+logger = get_logger("tools.schedule_visit")
 
 
 def _find_property(user_id: str, property_name: str):
@@ -33,22 +37,26 @@ async def save_visit_time(
     visit_date = transcribe_date(visit_date)
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"{settings.RENTOK_API_BASE_URL}/bookingBot/add-booking",
-                json={
-                    "user_id": user_id,
-                    "property_id": property_id,
-                    "visit_date": visit_date,
-                    "visit_time": visit_time,
-                    "visit_type": visit_type,
-                    "property_name": prop.get("property_name", property_name),
-                },
-            )
-            if resp.status_code == 400:
-                return "There is already a scheduled visit for this property or a visit on the same date. Would you like to see your scheduled visits?"
-            resp.raise_for_status()
-            data = resp.json()
+        resp = await http_post(
+            f"{settings.RENTOK_API_BASE_URL}/bookingBot/add-booking",
+            json={
+                "user_id": user_id,
+                "property_id": property_id,
+                "visit_date": visit_date,
+                "visit_time": visit_time,
+                "visit_type": visit_type,
+                "property_name": prop.get("property_name", property_name),
+            },
+            raw=True,
+        )
+        if resp.status_code == 400:
+            return "There is already a scheduled visit for this property or a visit on the same date. Would you like to see your scheduled visits?"
+        resp.raise_for_status()
+        data = resp.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 400:
+            return "There is already a scheduled visit for this property or a visit on the same date. Would you like to see your scheduled visits?"
+        return f"Error scheduling visit: {str(e)}"
     except Exception as e:
         return f"Error scheduling visit: {str(e)}"
 
@@ -68,6 +76,23 @@ async def save_visit_time(
     location_info = f"\nLocation: {maps_link}" if maps_link else ""
 
     track_funnel(user_id, "visit")
+    record_visit_scheduled(user_id, property_id)
+
+    # Schedule follow-up: 2 hours after the visit time
+    try:
+        from datetime import datetime as _dt
+        visit_dt = _dt.strptime(f"{visit_date} {visit_time}", "%d/%m/%Y %I:%M %p")
+        seconds_until_visit = max(0, (visit_dt - _dt.now()).total_seconds())
+        followup_delay = int(seconds_until_visit) + 7200  # visit time + 2h
+        schedule_followup(user_id, "visit_complete", {
+            "property_name": prop.get("property_name", property_name),
+            "property_id": property_id,
+            "visit_date": visit_date,
+            "visit_time": visit_time,
+        }, followup_delay)
+    except Exception as e:
+        logger.warning("follow-up scheduling failed: %s", e)
+
     return (
         f"Visit scheduled successfully for '{prop.get('property_name', property_name)}' "
         f"on {visit_date} at {visit_time} ({visit_type}).{location_info}"
@@ -109,10 +134,9 @@ async def _create_external_lead(
         "firebase_id": f"cust_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}",
     }
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            await client.post(
-                f"{settings.RENTOK_API_BASE_URL}/tenant/addLeadFromEazyPGID",
-                json=payload,
-            )
-    except Exception:
-        pass  # Non-critical — don't fail the booking
+        await http_post(
+            f"{settings.RENTOK_API_BASE_URL}/tenant/addLeadFromEazyPGID",
+            json=payload,
+        )
+    except Exception as e:
+        logger.warning("lead creation failed for user=%s eazypg_id=%s: %s", user_id, eazypg_id, e)

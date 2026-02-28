@@ -24,7 +24,7 @@ _BOOKING_BASE_TOOLS: list[str] = [
 ]
 
 _AGENT_TOOLS: dict[str, list[str]] = {
-    "default": ["brand_info"],
+    "default": ["brand_info", "web_search"],
     "broker": [
         "save_preferences",
         "search_properties",
@@ -32,15 +32,19 @@ _AGENT_TOOLS: dict[str, list[str]] = {
         "shortlist_property",
         "fetch_property_images",
         "fetch_landmarks",
+        "estimate_commute",
         "fetch_nearby_places",
         "fetch_room_details",
         "fetch_properties_by_query",
+        "compare_properties",
+        "web_search",
     ],
-    "booking": _BOOKING_BASE_TOOLS + (_KYC_TOOLS if settings.KYC_ENABLED else []),
+    "booking": _BOOKING_BASE_TOOLS + (_KYC_TOOLS if settings.KYC_ENABLED else []) + ["save_preferences", "web_search"],
     "profile": [
         "fetch_profile_details",
         "get_scheduled_events",
         "get_shortlisted_properties",
+        "web_search",
     ],
 }
 
@@ -93,7 +97,10 @@ SCHEMAS = {
                 "unit_types_available": {"type": "string", "description": "Comma-separated: ROOM, 1RK, 1BHK, 2BHK, 3BHK, 4BHK, 5BHK"},
                 "pg_available_for": {"type": "string", "description": "All Girls, All Boys, or Any"},
                 "sharing_types_enabled": {"type": "string", "description": "Room sharing count: 1 for single, 2 for double, etc."},
-                "amenities": {"type": "string", "description": "Comma-separated amenities: gym, wifi, parking, kitchen, etc."},
+                "amenities": {"type": "string", "description": "Comma-separated amenities: gym, wifi, parking, kitchen, etc. For backward compatibility, always pass the full combined list here."},
+                "must_have_amenities": {"type": "string", "description": "Comma-separated amenities the user MUST have (said 'need', 'require', 'must have'). E.g. 'AC, WiFi'"},
+                "nice_to_have_amenities": {"type": "string", "description": "Comma-separated amenities the user would PREFER but aren't essential (said 'prefer', 'nice to have', 'if possible'). E.g. 'gym, parking'"},
+                "deal_breakers": {"type": "string", "description": "Comma-separated deal-breakers inferred from user rejecting 2+ properties for the same reason. E.g. 'no AC, far from metro'. Only set when a clear pattern emerges from rejections."},
                 "description": {"type": "string", "description": "User's free-text description of what they want"},
                 "commute_from": {"type": "string", "description": "User's commute reference point — office, college, or any landmark they want properties near. E.g. 'Reliance Corporate Park, Navi Mumbai'"},
             },
@@ -156,6 +163,19 @@ SCHEMAS = {
             "required": ["landmark_name", "property_name"],
         },
     },
+    "estimate_commute": {
+        "name": "estimate_commute",
+        "description": "Estimate commute time from a property to a destination (office, college, etc.) via car AND public transit (metro/train). Returns driving time and transit route with walking + ride breakdown.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "property_name": {"type": "string", "description": "Exact property name"},
+                "destination": {"type": "string", "description": "Destination name or address (e.g. office name, college, area)"},
+                "city": {"type": "string", "description": "City name (optional, auto-detected from property data)"},
+            },
+            "required": ["property_name", "destination"],
+        },
+    },
     "fetch_nearby_places": {
         "name": "fetch_nearby_places",
         "description": "Find nearby points of interest (restaurants, metro stations, hospitals, etc.) around a property.",
@@ -189,6 +209,43 @@ SCHEMAS = {
                 "query": {"type": "string", "description": "Property name or search query"},
             },
             "required": ["query"],
+        },
+    },
+    "compare_properties": {
+        "name": "compare_properties",
+        "description": "Compare 2-3 properties side-by-side. Fetches details and rooms for all properties in parallel and returns a structured comparison with match scores and a recommendation. Use when user says 'compare', 'which is better', 'X vs Y'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "property_names": {
+                    "type": "string",
+                    "description": "Comma-separated property names to compare (2-3 properties). E.g. 'Stanza Living, Zolo Stays'",
+                },
+            },
+            "required": ["property_names"],
+        },
+    },
+    "web_search": {
+        "name": "web_search",
+        "description": "Search the web for real-time market data, area intelligence, brand info, or general knowledge. Use for: rent ranges, neighborhood safety, connectivity, brand reviews, or any factual question tools can't answer. Cached results are returned instantly. Max 3 searches per conversation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query. Be specific: 'average rent for PG in Andheri West Mumbai 2024' is better than 'rent Andheri'",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "One of: 'area' (neighborhood data, rent ranges, connectivity), 'brand' (reviews, reputation), 'general' (anything else)",
+                    "enum": ["area", "brand", "general"],
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Brief context for why you need this search (helps with result relevance)",
+                },
+            },
+            "required": ["query", "category"],
         },
     },
     "save_phone_number": {
@@ -367,10 +424,11 @@ def init_registry() -> None:
     from tools.broker.property_details import fetch_property_details
     from tools.broker.shortlist import shortlist_property
     from tools.broker.images import fetch_property_images
-    from tools.broker.landmarks import fetch_landmarks
+    from tools.broker.landmarks import fetch_landmarks, estimate_commute
     from tools.broker.nearby_places import fetch_nearby_places
     from tools.broker.room_details import fetch_room_details
     from tools.broker.query_properties import fetch_properties_by_query
+    from tools.broker.compare import compare_properties
     from tools.booking.save_phone import save_phone_number
     from tools.booking.schedule_visit import save_visit_time
     from tools.booking.schedule_call import save_call_time
@@ -384,6 +442,7 @@ def init_registry() -> None:
     from tools.profile.shortlisted import get_shortlisted_properties
     from tools.default.brand_info import brand_info
     from tools.broker.preferences import save_preferences
+    from tools.common.web_search import web_search
 
     handlers = {
         "brand_info": brand_info,
@@ -394,9 +453,12 @@ def init_registry() -> None:
         "shortlist_property": shortlist_property,
         "fetch_property_images": fetch_property_images,
         "fetch_landmarks": fetch_landmarks,
+        "estimate_commute": estimate_commute,
         "fetch_nearby_places": fetch_nearby_places,
         "fetch_room_details": fetch_room_details,
         "fetch_properties_by_query": fetch_properties_by_query,
+        "compare_properties": compare_properties,
+        "web_search": web_search,
         "save_visit_time": save_visit_time,
         "save_call_time": save_call_time,
         "create_payment_link": create_payment_link,
