@@ -153,8 +153,8 @@ def match_score(
         score += 15  # No preference = neutral
 
     # Property type match (10 pts)
-    pref_type = preferences.get("property_type", "").lower()
-    prop_type = property_data.get("property_type", "").lower()
+    pref_type = (preferences.get("property_type") or "").lower()
+    prop_type = (property_data.get("property_type") or "").lower()
     if pref_type and prop_type:
         if pref_type in prop_type or prop_type in pref_type:
             score += 10
@@ -162,8 +162,8 @@ def match_score(
         score += 5  # No preference
 
     # Gender match (10 pts)
-    pref_gender = preferences.get("pg_available_for", "").lower()
-    prop_gender = property_data.get("pg_available_for", "").lower()
+    pref_gender = (preferences.get("pg_available_for") or "").lower()
+    prop_gender = (property_data.get("pg_available_for") or "").lower()
     if pref_gender and prop_gender:
         if pref_gender == "any" or prop_gender == "any" or pref_gender in prop_gender:
             score += 10
