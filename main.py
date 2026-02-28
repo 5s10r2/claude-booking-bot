@@ -32,6 +32,7 @@ from config import settings
 from core.claude import AnthropicEngine
 from core.conversation import ConversationManager
 from core.message_parser import parse_message_parts
+from core.ui_parts import generate_ui_parts
 from core.tool_executor import ToolExecutor
 from tools.registry import init_registry, get_all_handlers
 from db import postgres as pg
@@ -265,6 +266,13 @@ async def chat(req: ChatRequest):
         logger.warning("parse_message_parts failed: %s", e)
         parts = [{"type": "text", "markdown": response}]
 
+    # Generate backend-controlled UI parts (chips, buttons)
+    try:
+        ui_parts = generate_ui_parts(response, agent_name, req.user_id, language)
+        parts.extend(ui_parts)
+    except Exception as e:
+        logger.warning("generate_ui_parts failed: %s", e)
+
     return ChatResponse(response=response, agent=agent_name, parts=parts, locale=language)
 
 
@@ -356,6 +364,13 @@ async def chat_stream(req: ChatRequest):
         except Exception as e:
             logger.warning("parse_message_parts failed: %s", e)
             parts = [{"type": "text", "markdown": full_text}]
+
+        # Generate backend-controlled UI parts (chips, buttons)
+        try:
+            ui_parts = generate_ui_parts(full_text, agent_name, req.user_id, language)
+            parts.extend(ui_parts)
+        except Exception as e:
+            logger.warning("generate_ui_parts failed: %s", e)
 
         # Emit final done event with the full assembled response + parts + locale
         yield f"event: done\ndata: {json.dumps({'agent': agent_name, 'full_response': full_text, 'parts': parts, 'locale': language})}\n\n"
