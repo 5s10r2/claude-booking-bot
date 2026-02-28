@@ -266,6 +266,18 @@ def _build_carousel_parts(
             lat = str(redis_info.get("property_lat", "")) if redis_info.get("property_lat") else ""
             lng = str(redis_info.get("property_long", "")) if redis_info.get("property_long") else ""
 
+        # Match score + amenities for Carousel v2
+        score = ""
+        amenities = ""
+        if redis_info:
+            raw_score = redis_info.get("match_score", "")
+            if raw_score not in ("", None):
+                try:
+                    score = str(round(float(raw_score)))
+                except (ValueError, TypeError):
+                    pass
+            amenities = redis_info.get("amenities", "")
+
         properties.append({
             "name": name,
             "location": location,
@@ -276,6 +288,8 @@ def _build_carousel_parts(
             "link": link,
             "lat": lat,
             "lng": lng,
+            "score": score,
+            "amenities": amenities,
         })
 
     # Text before first match

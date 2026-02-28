@@ -1,24 +1,27 @@
 """
 ui_parts.py — Backend-controlled UI part generator (Generative UI).
 
-Generates structured UI parts (quick_replies, action_buttons) that the
-frontend renders via its component registry. Replaces the fragile frontend
-quick-replies.js which guessed context from regex on bot text.
+Generates structured UI parts that the frontend renders via its component
+registry. Replaces the fragile frontend quick-replies.js which guessed
+context from regex on bot text.
 
 Advantages over frontend chip generation:
-  - Access to Redis (property names, user prefs, shortlist, memory)
+  - Access to Redis (property names, user prefs, shortlist, memory, images)
   - Deterministic: no regex guessing — knows the agent + response context
   - Single source of truth: backend decides what UI to show
   - i18n-ready: chips are generated in the user's locale
 
 Part types emitted:
-  - quick_replies: { type, chips: [{ label, action, icon? }] }
-  - action_buttons: { type, buttons: [{ label, action, style }] }
+  - quick_replies:     { type, chips: [{ label, action, icon? }] }
+  - action_buttons:    { type, buttons: [{ label, action, style }] }
+  - status_card:       { type, status, icon, title, subtitle, details[], actions[] }
+  - confirmation_card: { type, title, subtitle, details[], confirm_action, cancel_action, style }
+  - image_gallery:     { type, property_name, images: [{ url, caption? }] }
 """
 
 import re
 from core.log import get_logger
-from db.redis_store import get_property_info_map, get_preferences
+from db.redis_store import get_property_info_map, get_preferences, get_property_images_id
 
 logger = get_logger("core.ui_parts")
 
@@ -335,6 +338,252 @@ def _default_chips(text: str, ctx: dict, locale: str) -> list[dict]:
     ]
 
 
+# ── Rich card generators ─────────────────────────────────────────────────
+
+def _extract_date(text: str) -> str:
+    """Extract a human-readable date from text."""
+    # DD/MM/YYYY or DD-MM-YYYY
+    m = re.search(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", text)
+    if m:
+        return m.group(1)
+    # "1st March 2026" / "March 1, 2026" / "15th Jan" etc.
+    m = re.search(
+        r"(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*(?:\s+\d{4})?)",
+        text, re.IGNORECASE,
+    )
+    if m:
+        return m.group(1)
+    m = re.search(
+        r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s*\d{4})?)",
+        text, re.IGNORECASE,
+    )
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _extract_time(text: str) -> str:
+    """Extract a time string like '10:30 AM' from text."""
+    m = re.search(r"(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"(\d{1,2}\s*(?:AM|PM|am|pm))", text)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _extract_maps_link(text: str) -> str:
+    """Extract a Google Maps link from text."""
+    m = re.search(r"(https?://(?:www\.)?google\.com/maps\S+)", text)
+    if m:
+        return m.group(1)
+    # Markdown link format: [text](url)
+    m = re.search(r"\[.*?\]\((https?://(?:www\.)?google\.com/maps\S+?)\)", text)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _generate_status_card(text: str, ctx: dict, user_id: str, locale: str) -> dict | None:
+    """Generate a status_card for confirmed milestones.
+
+    These are the moments that matter — a visit confirmed, a property
+    saved, a payment completed. They deserve more than a text line.
+    """
+    lower = text.lower()
+
+    # ── Visit scheduled ──
+    if ctx["is_confirmed"] and ("visit" in lower or "booking" in lower):
+        prop_name = _extract_single_name(text) or ""
+        date_str = _extract_date(text)
+        time_str = _extract_time(text)
+        maps_link = _extract_maps_link(text)
+
+        details = []
+        if date_str:
+            details.append({"icon": "calendar", "text": date_str})
+        if time_str:
+            details.append({"icon": "clock", "text": time_str})
+        if maps_link:
+            details.append({"icon": "location", "text": "View on Maps", "url": maps_link})
+
+        return {
+            "type": "status_card",
+            "status": "success",
+            "icon": "calendar-check",
+            "title": _t("visit", locale) + " " + (_t("confirm", locale) if locale != "en" else "Confirmed!"),
+            "subtitle": prop_name,
+            "details": details,
+            "actions": [
+                {"label": _t("my_bookings", locale), "action": "Show my upcoming visits", "style": "secondary"},
+                {"label": _t("browse_more", locale), "action": "Show me more properties", "style": "secondary"},
+            ],
+        }
+
+    # ── Property shortlisted ──
+    if ctx["is_shortlisted"] and "success" in lower:
+        prop_name = _extract_single_name(text) or ""
+        return {
+            "type": "status_card",
+            "status": "success",
+            "icon": "star",
+            "title": _t("shortlist", locale) + ("ed!" if locale == "en" else "!"),
+            "subtitle": prop_name,
+            "details": [],
+            "actions": [
+                {
+                    "label": _t("visit", locale),
+                    "action": f"Schedule a visit for {prop_name}" if prop_name else "Schedule a visit",
+                    "style": "primary",
+                },
+                {"label": _t("more_options", locale), "action": "Show me more properties", "style": "secondary"},
+            ],
+        }
+
+    # ── Payment link generated ──
+    if ctx["is_payment"] and ("link" in lower or "generated" in lower or "pay now" in lower):
+        prop_name = _extract_single_name(text) or ""
+        # Extract amount
+        amount_m = re.search(r"₹\s*([\d,]+)", text)
+        amount = amount_m.group(0) if amount_m else ""
+        # Extract payment URL
+        pay_url_m = re.search(r"(https?://\S*(?:pay|razorpay|checkout)\S*)", text, re.IGNORECASE)
+        pay_url = pay_url_m.group(1) if pay_url_m else ""
+
+        details = []
+        if amount:
+            details.append({"icon": "wallet", "text": f"Amount: {amount}"})
+        if prop_name:
+            details.append({"icon": "home", "text": prop_name})
+
+        if pay_url or amount:
+            return {
+                "type": "status_card",
+                "status": "info",
+                "icon": "wallet",
+                "title": "Payment Ready",
+                "subtitle": f"Token amount for {prop_name}" if prop_name else "Complete your payment",
+                "details": details,
+                "actions": [
+                    {"label": "Pay Now", "action": pay_url or "I want to proceed with payment", "style": "primary", "url": pay_url},
+                    {"label": _t("ive_paid", locale), "action": "I have completed the payment", "style": "secondary"},
+                ],
+            }
+
+    return None
+
+
+def _generate_image_gallery(text: str, user_id: str) -> dict | None:
+    """Generate an image_gallery part when property images are available.
+
+    Images help users _feel_ a space — the room they'll sleep in, the
+    kitchen they'll cook in. This is the closest to visiting in person.
+    """
+    lower = text.lower()
+    if "image" not in lower and "photo" not in lower and "pic" not in lower:
+        return None
+
+    images = get_property_images_id(user_id)
+    if not images:
+        return None
+
+    prop_name = _extract_single_name(text) or "Property"
+
+    image_urls = []
+    for img in images:
+        if isinstance(img, dict):
+            url = img.get("url", img.get("media_id", ""))
+        else:
+            url = str(img)
+        if url and url.startswith("http"):
+            image_urls.append({"url": url})
+
+    if not image_urls:
+        return None
+
+    return {
+        "type": "image_gallery",
+        "property_name": prop_name,
+        "images": image_urls[:10],
+    }
+
+
+def _generate_confirmation_card(text: str, ctx: dict, user_id: str, locale: str) -> dict | None:
+    """Generate a confirmation_card when the bot asks the user to confirm an action.
+
+    These are high-stakes moments: reserving a bed, confirming a visit time,
+    proceeding with payment. The user needs to clearly see what they're
+    agreeing to — property name, date/time, amount — before they commit.
+    Reducing ambiguity reduces anxiety.
+    """
+    lower = text.lower()
+
+    # Only trigger when the bot is ASKING for confirmation (not announcing one)
+    is_asking = (
+        "confirm" in lower
+        or "shall i" in lower
+        or "should i" in lower
+        or "would you like to" in lower
+        or "do you want" in lower
+        or "proceed" in lower
+        or "go ahead" in lower
+    )
+    # Don't trigger if it's already confirmed (status card handles that)
+    already_confirmed = "confirmed" in lower or "successfully" in lower or "done" in lower
+    if not is_asking or already_confirmed:
+        return None
+
+    prop_name = _extract_single_name(text) or ""
+    date_str = _extract_date(text)
+    time_str = _extract_time(text)
+
+    # ── Visit confirmation ──
+    if "visit" in lower or "schedule" in lower:
+        details = []
+        if prop_name:
+            details.append({"icon": "home", "text": prop_name})
+        if date_str:
+            details.append({"icon": "calendar", "text": date_str})
+        if time_str:
+            details.append({"icon": "clock", "text": time_str})
+
+        if details:
+            return {
+                "type": "confirmation_card",
+                "title": "Confirm Your Visit",
+                "subtitle": "We'll let the property manager know you're coming",
+                "details": details,
+                "confirm_action": "Yes, confirm the visit",
+                "cancel_action": _t("change_time", locale),
+                "style": "visit",
+            }
+
+    # ── Reservation / payment confirmation ──
+    if "reserv" in lower or "payment" in lower or "token" in lower or "book" in lower:
+        amount_m = re.search(r"₹\s*([\d,]+)", text)
+        amount = amount_m.group(0) if amount_m else ""
+
+        details = []
+        if prop_name:
+            details.append({"icon": "home", "text": prop_name})
+        if amount:
+            details.append({"icon": "wallet", "text": f"Amount: {amount}"})
+
+        if details:
+            return {
+                "type": "confirmation_card",
+                "title": "Confirm Reservation",
+                "subtitle": "Token amount to reserve your bed" if amount else "Reserve your spot",
+                "details": details,
+                "confirm_action": "Yes, proceed with payment" if amount else "Yes, reserve the bed",
+                "cancel_action": "No, cancel",
+                "style": "payment",
+            }
+
+    return None
+
+
 # ── Main entry point ─────────────────────────────────────────────────────
 
 def generate_ui_parts(
@@ -359,7 +608,31 @@ def generate_ui_parts(
     # Detect response context
     ctx = _detect_context(response_text, agent_name)
 
-    # Generate chips based on agent
+    parts = []
+
+    # ── Rich cards (status card, image gallery) — before chips ──
+    try:
+        status = _generate_status_card(response_text, ctx, user_id, locale)
+        if status:
+            parts.append(status)
+    except Exception as e:
+        logger.warning("status_card generation failed: %s", e)
+
+    try:
+        gallery = _generate_image_gallery(response_text, user_id)
+        if gallery:
+            parts.append(gallery)
+    except Exception as e:
+        logger.warning("image_gallery generation failed: %s", e)
+
+    try:
+        confirm = _generate_confirmation_card(response_text, ctx, user_id, locale)
+        if confirm:
+            parts.append(confirm)
+    except Exception as e:
+        logger.warning("confirmation_card generation failed: %s", e)
+
+    # ── Quick reply chips — always last so they appear below cards ──
     chips = []
     if agent_name == "broker":
         chips = _broker_chips(response_text, ctx, user_id, locale)
@@ -370,7 +643,11 @@ def generate_ui_parts(
     elif agent_name == "default":
         chips = _default_chips(response_text, ctx, locale)
 
-    parts = []
+    # If we generated a status card or confirmation card, suppress default chips
+    has_card = any(p["type"] in ("status_card", "confirmation_card") for p in parts)
+    if parts and has_card:
+        chips = []  # card has its own actions
+
     if chips:
         parts.append({"type": "quick_replies", "chips": chips})
 

@@ -375,6 +375,7 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         min_token = p.get("p_min_token_amount", 1000)
         microsite_url = p.get("p_microsite_url", p.get("microsite_url", ""))
         match_score = p.get("_custom_score", p.get("p_match_score", p.get("match_score", "")))
+        amenities_raw = p.get("p_common_amenities", p.get("p_amenities", ""))
         sharing_types_data = p.get("p_sharing_types_enabled", [])
 
         info = {
@@ -398,6 +399,7 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
             "phone_number": phone,
             "min_token_amount": min_token,
             "property_min_token_amount": min_token,    # alias for payment tool
+            "amenities": amenities_raw,
             "sharing_types": sharing_types_data,
         }
         # Replace old entry for same property (dedup) or append new
