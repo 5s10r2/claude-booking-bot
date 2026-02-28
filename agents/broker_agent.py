@@ -1,6 +1,6 @@
 """
 Broker agent: handles property search, recommendations, details, images, shortlisting.
-Uses Sonnet (complex multi-step reasoning needed for search + scoring).
+Uses Haiku (cost-optimized; switch back to SONNET_MODEL if quality drops).
 """
 
 from config import settings
@@ -30,7 +30,7 @@ def get_config(user_id: str, language: str = "en") -> dict:
     return {
         "system_prompt": system_prompt,
         "tools": tools,
-        "model": settings.SONNET_MODEL,
+        "model": settings.HAIKU_MODEL,
         "executor": executor,
     }
 
