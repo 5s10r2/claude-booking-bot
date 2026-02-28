@@ -3,7 +3,7 @@ import re
 import httpx
 
 from config import settings
-from db.redis_store import set_aadhar_user_name, set_aadhar_gender
+from db.redis_store import set_aadhar_user_name, set_aadhar_gender, get_user_phone
 
 
 async def fetch_kyc_status(user_id: str, **kwargs) -> str:
@@ -40,13 +40,20 @@ async def initiate_kyc(user_id: str, aadhar_number: str, **kwargs) -> str:
     if not re.match(r"^\d{12}$", aadhar_clean):
         return "Invalid Aadhaar number. It must be exactly 12 digits."
 
+    phone = get_user_phone(user_id)
+    if not phone:
+        return (
+            "I need your mobile number to send the Aadhaar OTP. "
+            "Please share your 10-digit Indian mobile number first."
+        )
+
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{settings.RENTOK_API_BASE_URL}/checkIn/generateAadharOTP",
                 json={
                     "aadhar_number": aadhar_clean,
-                    "user_phone_number": user_id,
+                    "user_phone_number": phone,
                 },
             )
             resp.raise_for_status()
@@ -62,11 +69,13 @@ async def verify_kyc(user_id: str, otp: str, **kwargs) -> str:
     if not otp_clean:
         return "Please provide the OTP."
 
+    phone = get_user_phone(user_id) or user_id
+
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{settings.RENTOK_API_BASE_URL}/checkIn/verifyAadharOTP",
-                json={"otp": otp_clean, "user_phone_number": user_id},
+                json={"otp": otp_clean, "user_phone_number": phone},
             )
             resp_data = resp.json()
     except Exception as e:

@@ -1,7 +1,7 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map, get_whitelabel_pg_ids, track_funnel
+from db.redis_store import get_property_info_map, get_whitelabel_pg_ids, track_funnel, get_user_phone
 
 
 async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
@@ -21,16 +21,19 @@ async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
         return f"Property '{property_name}' not found in search results."
 
     prop_id = prop.get("prop_id") or prop.get("pg_id")
-    phone = prop.get("phone_number", user_id[:12])
+    # property_contact = the property's own phone (from listing data), not the user's phone
+    property_contact = prop.get("phone_number", "")
+    # user_id field: use real phone if available, else full user_id as opaque key
+    user_phone = get_user_phone(user_id) or user_id
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{settings.RENTOK_API_BASE_URL}/bookingBot/shortlist-booking-bot-property",
                 json={
-                    "user_id": user_id[:12],
+                    "user_id": user_phone,
                     "property_id": prop_id,
-                    "property_contact": phone,
+                    "property_contact": property_contact,
                 },
             )
             resp.raise_for_status()

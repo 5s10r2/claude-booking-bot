@@ -7,6 +7,8 @@ from db.redis_store import (
     get_payment_info,
     clear_payment_info,
     track_funnel,
+    get_user_phone,
+    get_aadhar_user_name,
 )
 
 
@@ -28,12 +30,20 @@ async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str
     pg_number = prop.get("pg_number", "")
     amount = prop.get("property_min_token_amount", 0) or 1000
 
+    # Resolve phone — required by Rentok tenant system
+    phone = get_user_phone(user_id)
+    if not phone:
+        return (
+            "I need your mobile number to generate a payment link. "
+            "Please share your 10-digit Indian mobile number and I'll proceed right away!"
+        )
+
     # Fetch tenant UUID first (creates lead if needed)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             uuid_resp = await client.get(
                 f"{settings.RENTOK_API_BASE_URL}/tenant/get-tenant_uuid",
-                params={"phone": user_id[-10:], "eazypg_id": eazypg_id},
+                params={"phone": phone, "eazypg_id": eazypg_id},
             )
             uuid_resp.raise_for_status()
             tenant_uuid = uuid_resp.json().get("data", {}).get("tenant_uuid", "")
@@ -48,7 +58,7 @@ async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str
             async with httpx.AsyncClient(timeout=15) as client:
                 uuid_resp = await client.get(
                     f"{settings.RENTOK_API_BASE_URL}/tenant/get-tenant_uuid",
-                    params={"phone": user_id[-10:], "eazypg_id": eazypg_id},
+                    params={"phone": phone, "eazypg_id": eazypg_id},
                 )
                 uuid_resp.raise_for_status()
                 tenant_uuid = uuid_resp.json().get("data", {}).get("tenant_uuid", "")
@@ -125,14 +135,16 @@ async def verify_payment(user_id: str, **kwargs) -> str:
             gender = get_aadhar_gender(user_id) or "Any"
             prefs = get_preferences(user_id)
             budget = prefs.get("min_budget") or prefs.get("max_budget", "")
+            phone = get_user_phone(user_id) or ""
+            name = get_aadhar_user_name(user_id) or phone or "Guest"
 
             async with httpx.AsyncClient(timeout=15) as client:
                 await client.post(
                     f"{settings.RENTOK_API_BASE_URL}/tenant/addLeadFromEazyPGID",
                     json={
                         "eazypg_id": eazypg_id,
-                        "phone": user_id[-10:],
-                        "name": user_id[-10:],
+                        "phone": phone,
+                        "name": name,
                         "gender": gender,
                         "rent_range": budget,
                         "lead_source": "Booking Bot",

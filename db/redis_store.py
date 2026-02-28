@@ -2,6 +2,7 @@ import json
 import pickle
 import hashlib
 import os
+import re
 from typing import Optional
 
 import redis
@@ -299,6 +300,37 @@ def set_user_name(user_id: str, name: str) -> None:
 def get_user_name(user_id: str) -> Optional[str]:
     raw = _r().get(f"{user_id}:user_name")
     return raw.decode() if raw else None
+
+
+# ---------------------------------------------------------------------------
+# User phone number (web-chat users don't have a phone in user_id)
+# ---------------------------------------------------------------------------
+
+def set_user_phone(user_id: str, phone: str) -> None:
+    """Store the user's real 10-digit phone number (collected from web chat)."""
+    _r().set(f"{user_id}:user_phone", phone)
+
+
+def get_user_phone(user_id: str) -> Optional[str]:
+    """
+    Returns the user's 10-digit local phone number.
+
+    Priority order:
+      1. Explicitly stored phone (set_user_phone — used by web chat).
+      2. Derived from user_id when user_id IS a phone number (WhatsApp channel:
+         user_id = 12-digit international format like 919876543210).
+
+    Returns None if no valid phone can be determined (e.g. web-chat user who
+    hasn't provided their number yet).
+    """
+    stored = _r().get(f"{user_id}:user_phone")
+    if stored:
+        return stored.decode()
+    # WhatsApp fallback: strip non-digits and take last 10
+    digits = re.sub(r"\D", "", user_id)
+    if len(digits) >= 10:
+        return digits[-10:]
+    return None
 
 
 # ---------------------------------------------------------------------------

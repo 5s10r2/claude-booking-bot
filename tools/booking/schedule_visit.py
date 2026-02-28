@@ -1,7 +1,7 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map, get_account_values, track_funnel
+from db.redis_store import get_property_info_map, get_account_values, track_funnel, get_user_phone, get_aadhar_user_name
 from utils.date import transcribe_date
 
 
@@ -92,10 +92,13 @@ async def _create_external_lead(
 
     from datetime import datetime
 
+    phone = get_user_phone(user_id) or ""
+    name = get_aadhar_user_name(user_id) or phone or "Guest"
+
     payload = {
         "eazypg_id": eazypg_id,
-        "phone": user_id[-10:],
-        "name": user_id[-10:],
+        "phone": phone,
+        "name": name,
         "gender": gender,
         "rent_range": budget,
         "lead_source": "Booking Bot",

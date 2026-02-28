@@ -464,8 +464,12 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
             "   → If result says not verified: proceed to Step 3\n"
             "\n"
             "Step 3: KYC PROCESS\n"
-            '   a. Ask user for their 12-digit Aadhaar number\n'
+            "   a. Ask user for their 12-digit Aadhaar number\n"
             "   b. Call initiate_kyc with the aadhar_number\n"
+            "      → If result says a mobile number is needed:\n"
+            '         Ask user: "To send the Aadhaar OTP, I need your 10-digit mobile number. Please share it."\n'
+            "         Call save_phone_number with the phone_number the user provides\n"
+            "         Then call initiate_kyc again with the same aadhar_number\n"
             '      → If success: tell user "An OTP has been sent to your registered phone number. Please share it."\n'
             "      → If error: ask user to double-check their Aadhaar number and try again\n"
             "   c. STOP and wait for user to provide the OTP\n"
@@ -475,6 +479,10 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
             "\n"
             "Step 4: PAYMENT\n"
             "   a. Call create_payment_link with property_name\n"
+            "      → If result says a mobile number is needed:\n"
+            '         Ask user: "To generate the payment link, I need your 10-digit mobile number. Please share it."\n'
+            "         Call save_phone_number with the phone_number the user provides\n"
+            "         Then call create_payment_link again\n"
             '   b. Share the payment link with user: "Please complete the payment using this link: [link from result]"\n'
             "   c. STOP HERE — wait for user to come back and confirm they've paid\n"
             "   d. When user says they've paid → Call verify_payment\n"
@@ -491,6 +499,10 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
         kyc_reservation_flow = (
             "Step 2: PAYMENT\n"
             "   a. Call create_payment_link with property_name\n"
+            "      → If result says a mobile number is needed:\n"
+            '         Ask user: "To generate the payment link, I need your 10-digit mobile number. Please share it."\n'
+            "         Call save_phone_number with the phone_number the user provides\n"
+            "         Then call create_payment_link again\n"
             '   b. Share the payment link with user: "Please complete the payment using this link: [link from result]"\n'
             "   c. STOP HERE — wait for user to come back and confirm they've paid\n"
             "   d. When user says they've paid → Call verify_payment\n"

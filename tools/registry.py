@@ -12,6 +12,7 @@ _TOOL_SCHEMAS: dict[str, dict] = {}
 
 _KYC_TOOLS: list[str] = ["fetch_kyc_status", "initiate_kyc", "verify_kyc"]
 _BOOKING_BASE_TOOLS: list[str] = [
+    "save_phone_number",
     "save_visit_time",
     "save_call_time",
     "create_payment_link",
@@ -190,6 +191,20 @@ SCHEMAS = {
             "required": ["query"],
         },
     },
+    "save_phone_number": {
+        "name": "save_phone_number",
+        "description": "Save the user's 10-digit Indian mobile number so it can be used for payment links, visit scheduling, and KYC. Call this when the user provides their phone number and a mobile number is required to proceed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "phone_number": {
+                    "type": "string",
+                    "description": "The user's mobile number (10-digit Indian number, with or without +91 prefix)",
+                },
+            },
+            "required": ["phone_number"],
+        },
+    },
     "save_visit_time": {
         "name": "save_visit_time",
         "description": "Schedule a physical visit to a property. Visits available 9 AM - 5 PM, next 7 days, 30-minute slots.",
@@ -356,6 +371,7 @@ def init_registry() -> None:
     from tools.broker.nearby_places import fetch_nearby_places
     from tools.broker.room_details import fetch_room_details
     from tools.broker.query_properties import fetch_properties_by_query
+    from tools.booking.save_phone import save_phone_number
     from tools.booking.schedule_visit import save_visit_time
     from tools.booking.schedule_call import save_call_time
     from tools.booking.payment import create_payment_link, verify_payment
@@ -373,6 +389,7 @@ def init_registry() -> None:
         "brand_info": brand_info,
         "save_preferences": save_preferences,
         "search_properties": search_properties,
+        "save_phone_number": save_phone_number,
         "fetch_property_details": fetch_property_details,
         "shortlist_property": shortlist_property,
         "fetch_property_images": fetch_property_images,
@@ -394,7 +411,6 @@ def init_registry() -> None:
         "fetch_profile_details": fetch_profile_details,
         "get_scheduled_events": get_scheduled_events,
         "get_shortlisted_properties": get_shortlisted_properties,
-        "save_preferences": save_preferences,
     }
 
     for name, handler in handlers.items():
