@@ -38,7 +38,8 @@ async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str
             "Please share your 10-digit Indian mobile number and I'll proceed right away!"
         )
 
-    # Fetch tenant UUID first (creates lead if needed)
+    # Fetch tenant UUID — create lead if tenant doesn't exist yet
+    tenant_uuid = ""
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             uuid_resp = await client.get(
@@ -47,8 +48,11 @@ async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str
             )
             uuid_resp.raise_for_status()
             tenant_uuid = uuid_resp.json().get("data", {}).get("tenant_uuid", "")
-    except Exception as e:
-        # If UUID fetch fails, try creating the lead first
+    except Exception:
+        pass  # Will try creating lead below
+
+    # If no UUID yet, create a lead first then retry
+    if not tenant_uuid:
         try:
             from tools.booking.schedule_visit import _create_external_lead
 
