@@ -32,7 +32,7 @@ from config import settings
 from core.claude import AnthropicEngine
 from core.conversation import ConversationManager
 from core.message_parser import parse_message_parts
-from core.ui_parts import generate_ui_parts
+from core.ui_parts import generate_ui_parts, make_error_part
 from core.tool_executor import ToolExecutor
 from tools.registry import init_registry, get_all_handlers
 from db import postgres as pg
@@ -357,6 +357,22 @@ async def chat_stream(req: ChatRequest):
             error_msg = "I'm experiencing a temporary issue. Please try again."
             yield f"event: error\ndata: {json.dumps({'text': error_msg})}\n\n"
             full_text = full_text or error_msg
+            # Emit error card instead of plain text
+            error_part = make_error_part(
+                title="Couldn't process your request",
+                message="We hit a temporary issue. This usually resolves in a moment.",
+                retry_label="Try Again",
+                retry_message=req.message,
+            )
+            error_parts = [error_part]
+            yield f"event: done\ndata: {json.dumps({'agent': agent_name or 'system', 'full_response': full_text, 'parts': error_parts, 'locale': language})}\n\n"
+            # Persist and return
+            set_last_agent(req.user_id, agent_name or "system")
+            conversation.add_assistant_message(req.user_id, full_text)
+            pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
+            await pg.insert_message(thread_id=req.user_id, user_phone=req.user_id, message_text=req.message, message_sent_by=1, platform_type="api", is_template=False, pg_ids=pg_ids_list)
+            await pg.insert_message(thread_id=req.user_id, user_phone=req.user_id, message_text=full_text, message_sent_by=2, platform_type="api", is_template=False, pg_ids=pg_ids_list)
+            return
 
         # Parse structured parts for frontend rendering
         try:

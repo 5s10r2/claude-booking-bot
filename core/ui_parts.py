@@ -415,6 +415,7 @@ def _generate_status_card(text: str, ctx: dict, user_id: str, locale: str) -> di
             "title": _t("visit", locale) + " " + (_t("confirm", locale) if locale != "en" else "Confirmed!"),
             "subtitle": prop_name,
             "details": details,
+            "celebration": "confetti",
             "actions": [
                 {"label": _t("my_bookings", locale), "action": "Show my upcoming visits", "style": "secondary"},
                 {"label": _t("browse_more", locale), "action": "Show me more properties", "style": "secondary"},
@@ -431,6 +432,7 @@ def _generate_status_card(text: str, ctx: dict, user_id: str, locale: str) -> di
             "title": _t("shortlist", locale) + ("ed!" if locale == "en" else "!"),
             "subtitle": prop_name,
             "details": [],
+            "celebration": "heart",
             "actions": [
                 {
                     "label": _t("visit", locale),
@@ -465,6 +467,7 @@ def _generate_status_card(text: str, ctx: dict, user_id: str, locale: str) -> di
                 "title": "Payment Ready",
                 "subtitle": f"Token amount for {prop_name}" if prop_name else "Complete your payment",
                 "details": details,
+                "celebration": "checkmark",
                 "actions": [
                     {"label": "Pay Now", "action": pay_url or "I want to proceed with payment", "style": "primary", "url": pay_url},
                     {"label": _t("ive_paid", locale), "action": "I have completed the payment", "style": "secondary"},
@@ -582,6 +585,32 @@ def _generate_confirmation_card(text: str, ctx: dict, user_id: str, locale: str)
             }
 
     return None
+
+
+# ── Error card helper (used by main.py for pipeline/stream errors) ────────
+
+def make_error_part(
+    title: str = "Something went wrong",
+    message: str = "We're having trouble right now. This usually resolves in a moment.",
+    retry_label: str = "Try Again",
+    retry_message: str = "",
+) -> dict:
+    """Create an error_card UI part for pipeline/streaming errors.
+
+    Errors should feel warm and helpful, not alarming. The amber card
+    communicates "we know, we're on it" — not "everything is broken".
+    A retry button gives users agency instead of helplessness.
+    """
+    part = {
+        "type": "error_card",
+        "icon": "warning",
+        "title": title,
+        "message": message,
+    }
+    if retry_label and retry_message:
+        part["retry_action"] = retry_label
+        part["retry_message"] = retry_message
+    return part
 
 
 # ── Main entry point ─────────────────────────────────────────────────────
