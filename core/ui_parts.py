@@ -512,6 +512,179 @@ def _generate_image_gallery(text: str, user_id: str) -> dict | None:
     }
 
 
+def _generate_expandable_sections(text: str, user_id: str) -> dict | None:
+    """Generate expandable sections for property detail responses.
+
+    Property details have 25+ fields crammed into flat text. Collapsible
+    sections let users scan the overview and expand only what they care
+    about — amenities, house rules, FAQs, or property description.
+
+    Data source: Redis property_info_map (already populated by
+    fetch_property_details before this runs).
+    """
+    # Extract property name from the tool output header
+    name_m = re.search(r"PROPERTY DETAILS:\s*(.+)", text)
+    if not name_m:
+        return None
+
+    target_name = name_m.group(1).strip()
+
+    # Look up structured data from info_map
+    info_map = get_property_info_map(user_id)
+    prop = None
+    for p in info_map:
+        pname = p.get("property_name", "").strip()
+        if pname.lower() == target_name.lower():
+            prop = p
+            break
+    if not prop:
+        # Partial match fallback
+        for p in info_map:
+            pname = p.get("property_name", "").strip()
+            if target_name.lower() in pname.lower() or pname.lower() in target_name.lower():
+                prop = p
+                break
+    if not prop:
+        return None
+
+    sections = []
+
+    # ── Amenities ──
+    amenity_fields = ["amenities", "common_amenities", "food_amenities", "services_amenities"]
+    all_amenities = []
+    for field in amenity_fields:
+        raw = prop.get(field, "")
+        if raw and isinstance(raw, str):
+            items = [a.strip() for a in raw.split(",") if a.strip()]
+            all_amenities.extend(items)
+        elif raw and isinstance(raw, list):
+            all_amenities.extend([str(a).strip() for a in raw if a])
+
+    if all_amenities:
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for a in all_amenities:
+            key = a.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(a)
+        sections.append({
+            "id": "amenities",
+            "title": "Amenities & Facilities",
+            "icon": "\U0001f3e0",
+            "content_type": "pills",
+            "items": unique,
+        })
+
+    # ── House Rules & Policies ──
+    rules_kv = []
+    kv_fields = [
+        ("property_rules", "House Rules"),
+        ("notice_period", "Notice Period"),
+        ("agreement_period", "Agreement Period"),
+        ("locking_period", "Locking Period"),
+        ("checkin_time", "Check-in Time"),
+        ("checkout_time", "Check-out Time"),
+        ("gst_on_rent", "GST on Rent"),
+    ]
+    for field, label in kv_fields:
+        val = prop.get(field, "")
+        if val and isinstance(val, str) and val.strip():
+            rules_kv.append({"label": label, "value": val.strip()})
+
+    if rules_kv:
+        sections.append({
+            "id": "house_rules",
+            "title": "House Rules & Policies",
+            "icon": "\U0001f4cb",
+            "content_type": "key_value",
+            "items": rules_kv,
+        })
+
+    # ── FAQs ──
+    faqs_raw = prop.get("faqs", "")
+    faq_items = []
+    if faqs_raw and isinstance(faqs_raw, str) and faqs_raw.strip():
+        faq_items = _parse_faqs(faqs_raw)
+    elif faqs_raw and isinstance(faqs_raw, list):
+        for faq in faqs_raw:
+            if isinstance(faq, dict):
+                q = faq.get("question", faq.get("q", ""))
+                a = faq.get("answer", faq.get("a", ""))
+                if q and a:
+                    faq_items.append({"question": q.strip(), "answer": a.strip()})
+
+    if faq_items:
+        sections.append({
+            "id": "faqs",
+            "title": "FAQs",
+            "icon": "\u2753",
+            "content_type": "qa",
+            "items": faq_items,
+        })
+
+    # ── About ──
+    about = prop.get("about", "")
+    if about and isinstance(about, str) and about.strip() and len(about.strip()) > 20:
+        sections.append({
+            "id": "about",
+            "title": "About This Property",
+            "icon": "\u2139\ufe0f",
+            "content_type": "text",
+            "items": [about.strip()],
+        })
+
+    if not sections:
+        return None
+
+    return {
+        "type": "expandable_sections",
+        "property_name": target_name,
+        "sections": sections,
+    }
+
+
+def _parse_faqs(raw: str) -> list[dict]:
+    """Parse FAQ text into question/answer pairs.
+
+    Handles common formats:
+      - Q: question\\nA: answer
+      - **Q:** question\\n**A:** answer
+      - question?\\nanswer
+    """
+    pairs = []
+
+    # Try Q:/A: pattern first
+    qa_matches = re.findall(
+        r"(?:\*\*)?Q[:\.]?\s*(?:\*\*)?\s*(.+?)(?:\*\*)?(?:\n|\r\n?)(?:\*\*)?A[:\.]?\s*(?:\*\*)?\s*(.+?)(?=(?:\n(?:\*\*)?Q[:\.])|$)",
+        raw,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if qa_matches:
+        for q, a in qa_matches:
+            q, a = q.strip(), a.strip()
+            if q and a:
+                pairs.append({"question": q, "answer": a})
+        return pairs
+
+    # Try question? / answer pattern (lines ending with ?)
+    lines = [l.strip() for l in raw.split("\n") if l.strip()]
+    i = 0
+    while i < len(lines) - 1:
+        if lines[i].endswith("?"):
+            pairs.append({"question": lines[i], "answer": lines[i + 1]})
+            i += 2
+        else:
+            i += 1
+
+    # Fallback: treat whole text as a single item
+    if not pairs and raw.strip():
+        pairs.append({"question": "Frequently Asked", "answer": raw.strip()})
+
+    return pairs
+
+
 def _generate_confirmation_card(text: str, ctx: dict, user_id: str, locale: str) -> dict | None:
     """Generate a confirmation_card when the bot asks the user to confirm an action.
 
@@ -660,6 +833,15 @@ def generate_ui_parts(
             parts.append(confirm)
     except Exception as e:
         logger.warning("confirmation_card generation failed: %s", e)
+
+    # ── Expandable sections — collapsible amenities/rules/FAQ for property details ──
+    if ctx.get("is_property_detail"):
+        try:
+            exp = _generate_expandable_sections(response_text, user_id)
+            if exp:
+                parts.append(exp)
+        except Exception as e:
+            logger.warning("expandable_sections generation failed: %s", e)
 
     # ── Quick reply chips — always last so they appear below cards ──
     chips = []
