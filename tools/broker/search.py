@@ -44,7 +44,8 @@ def _get_search_cache(payload: dict) -> list | None:
         data = _json.loads(raw)
         logger.info("cache HIT (%s): %d results", key[-12:], len(data))
         return data
-    except Exception:
+    except Exception as e:
+        logger.debug("search cache decode failed for %s: %s", key[-12:], e)
         return None
 
 
@@ -111,7 +112,10 @@ async def _geocode_properties(properties: list[dict], limit: int = 5) -> None:
         return
 
     logger.info("geocoding %d properties (missing lat/lng)", len(to_geocode))
-    await asyncio.gather(*[_geocode_one(p) for p in to_geocode])
+    geo_results = await asyncio.gather(*[_geocode_one(p) for p in to_geocode], return_exceptions=True)
+    for i, r in enumerate(geo_results):
+        if isinstance(r, Exception):
+            logger.warning("geocode failed for property %d: %s", i, r)
 
 
 async def _call_search_api(payload: dict) -> list:
@@ -186,10 +190,13 @@ async def _enrich_with_images(properties: list, limit: int = 5) -> None:
     logger.info("image enrichment: fetching images for %d properties", len(targets))
     async with httpx.AsyncClient(timeout=8) as client:
         tasks = [_fetch_first_image(client, pg_id, pg_num) for _, pg_id, pg_num in targets]
-        urls = await asyncio.gather(*tasks)
+        urls = await asyncio.gather(*tasks, return_exceptions=True)
 
     enriched = 0
     for (idx, _, _), url in zip(targets, urls):
+        if isinstance(url, Exception):
+            logger.warning("image fetch failed for property at idx %d: %s", idx, url)
+            continue
         if url:
             properties[idx]["p_image"] = url
             enriched += 1

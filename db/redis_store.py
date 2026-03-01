@@ -8,6 +8,17 @@ from typing import Optional
 import redis
 
 from config import settings
+from core.log import get_logger
+
+logger = get_logger("db.redis_store")
+
+# ---------------------------------------------------------------------------
+# TTL constants (seconds)
+# ---------------------------------------------------------------------------
+PROPERTY_INFO_TTL = 15552000    # 6 months
+SEARCH_IDS_TTL = 600            # 10 minutes
+LANGUAGE_TTL = 86400            # 24 hours
+ANALYTICS_TTL = 90 * 86400     # 90 days
 
 # Prefer REDIS_URL (Render / managed Redis), fallback to host/port/password
 if settings.REDIS_URL:
@@ -56,7 +67,8 @@ def _json_get(key: str, default=None):
     # Backward compat: try pickle for keys written before migration
     try:
         return pickle.loads(raw)
-    except Exception:
+    except Exception as e:
+        logger.debug("_json_get pickle fallback failed: %s", e)
         return default
 
 
@@ -108,11 +120,11 @@ def get_preferences(user_id: str) -> dict:
 # Property info map (search results cache)
 # ---------------------------------------------------------------------------
 
-def set_property_info_map(user_id: str, info_map: list) -> None:
-    _json_set(f"{user_id}:property_info_map", info_map, ex=15552000)
+def set_property_info_map(user_id: str, info_map: list[dict]) -> None:
+    _json_set(f"{user_id}:property_info_map", info_map, ex=PROPERTY_INFO_TTL)
 
 
-def get_property_info_map(user_id: str) -> list:
+def get_property_info_map(user_id: str) -> list[dict]:
     return _json_get(f"{user_id}:property_info_map", default=[])
 
 
@@ -120,7 +132,7 @@ def get_property_info_map(user_id: str) -> list:
 # Shortlisted properties
 # ---------------------------------------------------------------------------
 
-def get_shortlisted_properties(user_id: str) -> list:
+def get_shortlisted_properties(user_id: str) -> list[dict]:
     return _json_get(f"{user_id}:shortlisted", default=[])
 
 
@@ -128,11 +140,11 @@ def get_shortlisted_properties(user_id: str) -> list:
 # Property template (carousel cards)
 # ---------------------------------------------------------------------------
 
-def save_property_template(user_id: str, template: list) -> None:
+def save_property_template(user_id: str, template: list[dict]) -> None:
     _json_set(f"{user_id}:property_template", template)
 
 
-def get_property_template(user_id: str) -> list:
+def get_property_template(user_id: str) -> list[dict]:
     return _json_get(f"{user_id}:property_template", default=[])
 
 
@@ -144,11 +156,11 @@ def clear_property_template(user_id: str) -> None:
 # Property images
 # ---------------------------------------------------------------------------
 
-def set_property_images_id(user_id: str, images: list) -> None:
+def set_property_images_id(user_id: str, images: list[str | None]) -> None:
     _json_set(f"{user_id}:property_images_id", images)
 
 
-def get_property_images_id(user_id: str) -> list:
+def get_property_images_id(user_id: str) -> list[str | None]:
     return _json_get(f"{user_id}:property_images_id", default=[])
 
 
@@ -160,11 +172,11 @@ def clear_property_images_id(user_id: str) -> None:
 # Image URLs
 # ---------------------------------------------------------------------------
 
-def set_image_urls(user_id: str, urls: list) -> None:
+def set_image_urls(user_id: str, urls: list[str]) -> None:
     _json_set(f"{user_id}:image_urls", urls)
 
 
-def get_image_urls(user_id: str) -> list:
+def get_image_urls(user_id: str) -> list[str]:
     return _json_get(f"{user_id}:image_urls", default=[])
 
 
@@ -226,7 +238,7 @@ def set_whitelabel_pg_ids(user_id: str, pg_ids: list) -> None:
     _json_set(f"{user_id}:pg_ids", pg_ids)
 
 
-def get_whitelabel_pg_ids(user_id: str) -> list:
+def get_whitelabel_pg_ids(user_id: str) -> list[str]:
     return _json_get(f"{user_id}:pg_ids", default=[])
 
 
@@ -368,10 +380,10 @@ def get_response(wama_id: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def set_property_id_for_search(user_id: str, property_ids: list) -> None:
-    _json_set(f"{user_id}:search_property_ids", property_ids, ex=600)
+    _json_set(f"{user_id}:search_property_ids", property_ids, ex=SEARCH_IDS_TTL)
 
 
-def get_property_id_for_search(user_id: str) -> list:
+def get_property_id_for_search(user_id: str) -> list[str]:
     return _json_get(f"{user_id}:search_property_ids", default=[])
 
 
@@ -442,7 +454,7 @@ def save_feedback(user_id: str, message_snippet: str, rating: str, agent: str = 
     _r().hincrby("feedback:counts", f"total:{rating}", 1)
 
 
-def get_feedback_counts() -> dict:
+def get_feedback_counts() -> dict[str, int]:
     """Return all feedback counters as a dict."""
     raw = _r().hgetall("feedback:counts")
     return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
@@ -454,7 +466,7 @@ def get_feedback_counts() -> dict:
 
 def set_user_language(user_id: str, lang: str) -> None:
     """Store detected/selected language. TTL = 24h (same as conversation)."""
-    _r().set(f"{user_id}:language", lang, ex=86400)
+    _r().set(f"{user_id}:language", lang, ex=LANGUAGE_TTL)
 
 
 def get_user_language(user_id: str) -> str:
@@ -473,10 +485,10 @@ def track_agent_usage(user_id: str, agent_name: str) -> None:
     day = date.today().isoformat()
     key = f"agent_usage:{day}"
     _r().hincrby(key, agent_name, 1)
-    _r().expire(key, 90 * 86400)
+    _r().expire(key, ANALYTICS_TTL)
 
 
-def get_agent_usage(day: str = None) -> dict:
+def get_agent_usage(day: str = None) -> dict[str, int]:
     """Return {agent: count} for a given day (default: today)."""
     if day is None:
         from datetime import date
@@ -500,10 +512,10 @@ def track_funnel(user_id: str, stage: str) -> None:
     day = date.today().isoformat()
     key = f"funnel:{day}"
     _r().hincrby(key, stage, 1)
-    _r().expire(key, 90 * 86400)  # keep 90 days
+    _r().expire(key, ANALYTICS_TTL)  # keep 90 days
 
 
-def get_funnel(day: str = None) -> dict:
+def get_funnel(day: str = None) -> dict[str, int]:
     """Return funnel counts for a given day (default: today)."""
     if day is None:
         from datetime import date

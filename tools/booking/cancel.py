@@ -1,15 +1,7 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map
-
-
-def _find_property(user_id: str, property_name: str):
-    info_map = get_property_info_map(user_id)
-    for p in info_map:
-        if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-            return p
-    return None
+from utils.properties import find_property as _find_property
 
 
 async def cancel_booking(user_id: str, property_name: str, **kwargs) -> str:

@@ -140,8 +140,8 @@ def _enrich_with_redis_names(props: list[dict], user_id: str) -> list[dict]:
         for i, prop in enumerate(props):
             if not prop.get("name") and i < len(info_map):
                 prop["name"] = info_map[i].get("property_name", "")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("property name enrichment failed: %s", e)
     return props
 
 

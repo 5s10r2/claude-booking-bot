@@ -4,17 +4,10 @@ from config import settings
 from core.log import get_logger
 from db.redis_store import get_property_info_map, get_account_values, track_funnel, get_user_phone, get_aadhar_user_name, record_visit_scheduled, schedule_followup
 from utils.date import transcribe_date
+from utils.properties import find_property as _find_property
 from utils.retry import http_post
 
 logger = get_logger("tools.schedule_visit")
-
-
-def _find_property(user_id: str, property_name: str):
-    info_map = get_property_info_map(user_id)
-    for p in info_map:
-        if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-            return p
-    return None
 
 
 async def save_visit_time(

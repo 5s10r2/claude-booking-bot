@@ -4,6 +4,7 @@ import httpx
 from config import settings
 from db.redis_store import get_whitelabel_pg_ids, _json_get, _json_set
 from core.log import get_logger
+from utils.api import check_rentok_response
 
 logger = get_logger("tools.brand_info")
 
@@ -32,7 +33,9 @@ async def brand_info(user_id: str, **kwargs) -> str:
                 params={"pg_ids": pg_ids_str},
             )
             resp.raise_for_status()
-            data = resp.json().get("data", {})
+            raw = resp.json()
+            check_rentok_response(raw, "property-info")
+            data = raw.get("data", {})
     except Exception as e:
         logger.warning("brand_info API failed: %s", e)
         return f"Error fetching brand info: {str(e)}"

@@ -11,17 +11,11 @@ from db.redis_store import (
     schedule_followup,
     cancel_followups,
 )
+from utils.api import check_rentok_response, RentokAPIError
+from utils.properties import find_property as _find_property
 from utils.retry import http_get, http_post
 
 logger = get_logger("tools.payment")
-
-
-def _find_property(user_id: str, property_name: str):
-    info_map = get_property_info_map(user_id)
-    for p in info_map:
-        if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-            return p
-    return None
 
 
 async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str:
@@ -49,8 +43,9 @@ async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str
             f"{settings.RENTOK_API_BASE_URL}/tenant/get-tenant_uuid",
             params={"phone": phone, "eazypg_id": eazypg_id},
         )
+        check_rentok_response(uuid_data, "get-tenant_uuid")
         tenant_uuid = uuid_data.get("data", {}).get("tenant_uuid", "")
-    except Exception as e:
+    except (RentokAPIError, Exception) as e:
         logger.warning("tenant UUID fetch failed for user=%s eazypg_id=%s: %s", user_id, eazypg_id, e)
 
     # If no UUID yet, create a lead first then retry
@@ -78,6 +73,9 @@ async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str
             f"{settings.RENTOK_API_BASE_URL}/tenant/{tenant_uuid}/lead-payment-link",
             params={"pg_id": pg_id, "pg_number": pg_number, "amount": amount},
         )
+        check_rentok_response(data, "lead-payment-link")
+    except RentokAPIError as e:
+        return f"Error generating payment link: {str(e)}"
     except Exception as e:
         return f"Error generating payment link: {str(e)}"
 

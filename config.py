@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     RENTOK_API_BASE_URL: str = "https://apiv2.rentok.com"
 
     # OSRM (map distance service)
-    OSRM_API_KEY: str = "f34519d734a599611aece8b96810d122"
+    OSRM_API_KEY: str = ""
 
     # WhatsApp (defaults from env, not hardcoded tokens)
     WHATSAPP_ACCESS_TOKEN: Optional[str] = None

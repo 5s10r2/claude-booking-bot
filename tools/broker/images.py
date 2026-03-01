@@ -1,22 +1,13 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map, set_property_images_id
+from db.redis_store import set_property_images_id
+from utils.api import check_rentok_response
+from utils.properties import find_property
 
 
 async def fetch_property_images(user_id: str, property_name: str, **kwargs) -> str:
-    info_map = get_property_info_map(user_id)
-    prop = None
-    for p in info_map:
-        if p.get("property_name", "").strip().lower() == property_name.strip().lower():
-            prop = p
-            break
-    if not prop:
-        for p in info_map:
-            if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-                prop = p
-                break
-
+    prop = find_property(user_id, property_name)
     if not prop:
         return f"Property '{property_name}' not found in search results."
 
@@ -31,6 +22,7 @@ async def fetch_property_images(user_id: str, property_name: str, **kwargs) -> s
             )
             resp.raise_for_status()
             data = resp.json()
+            check_rentok_response(data, "fetchPropertyImages")
     except Exception as e:
         return f"Error fetching images: {str(e)}"
 

@@ -3,11 +3,21 @@ import math
 import os
 
 from config import settings
-from db.redis_store import get_property_info_map
+from utils.properties import find_property as _find_prop
 from utils.retry import http_post, http_get
 from core.log import get_logger
 
 logger = get_logger("tools.landmarks")
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+EARTH_RADIUS_KM = 6371.0
+WALKING_SPEED_KMH = 5.0
+DEFAULT_STATION_RADIUS_M = 2000
+OVERPASS_TIMEOUT_S = 15
+METRO_INTER_STATION_KM = 1.5
+RAIL_INTER_STATION_KM = 2.5
 
 # ---------------------------------------------------------------------------
 # Transit line data (loaded once)
@@ -23,14 +33,15 @@ def _load_transit_data() -> dict:
         path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "transit_lines.json")
         with open(path, "r") as f:
             _TRANSIT_DATA = json.load(f)
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to load transit_lines.json: %s", e)
         _TRANSIT_DATA = {}
     return _TRANSIT_DATA
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance between two points in km."""
-    R = 6371.0
+    R = EARTH_RADIUS_KM
     rlat1, rlon1, rlat2, rlon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     dlat = rlat2 - rlat1
     dlon = rlon2 - rlon1
@@ -40,13 +51,13 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 def _walk_minutes(distance_km: float) -> float:
     """Estimate walking time at ~5 km/h."""
-    return (distance_km / 5.0) * 60
+    return (distance_km / WALKING_SPEED_KMH) * 60
 
 
 # ---------------------------------------------------------------------------
 # Overpass: find nearest metro / railway station
 # ---------------------------------------------------------------------------
-async def _find_nearest_station(lat: float, lon: float, radius: int = 2000) -> list[dict]:
+async def _find_nearest_station(lat: float, lon: float, radius: int = DEFAULT_STATION_RADIUS_M) -> list[dict]:
     """Query Overpass API for metro/railway stations near a point."""
     query = f"""
     [out:json];
@@ -61,7 +72,7 @@ async def _find_nearest_station(lat: float, lon: float, radius: int = 2000) -> l
         data = await http_get(
             "https://overpass-api.de/api/interpreter",
             params={"data": query},
-            timeout=15,
+            timeout=OVERPASS_TIMEOUT_S,
         )
     except Exception as e:
         logger.warning("Overpass station query failed: %s", e)
@@ -123,7 +134,7 @@ def _estimate_transit_time(
             if ol["line_name"] == dl["line_name"]:
                 station_gap = abs(ol["station_index"] - dl["station_index"])
                 # Approx 1.5 km between stations for metro, 2.5 km for rail
-                inter_station_km = 1.5 if ol["mode"] == "metro" else 2.5
+                inter_station_km = METRO_INTER_STATION_KM if ol["mode"] == "metro" else RAIL_INTER_STATION_KM
                 distance_km = station_gap * inter_station_km
                 travel_min = (distance_km / ol["avg_speed_kmh"]) * 60
                 return {
@@ -132,17 +143,6 @@ def _estimate_transit_time(
                     "travel_min": round(travel_min, 0),
                     "mode": ol["mode"],
                 }
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Helper: resolve property from info_map
-# ---------------------------------------------------------------------------
-def _find_prop(user_id: str, property_name: str) -> dict | None:
-    info_map = get_property_info_map(user_id)
-    for p in info_map:
-        if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-            return p
     return None
 
 
@@ -244,12 +244,12 @@ async def estimate_commute(
     transit_info = ""
 
     # Find nearest station to property
-    prop_stations = await _find_nearest_station(prop_lat, prop_long, radius=2000)
+    prop_stations = await _find_nearest_station(prop_lat, prop_long, radius=DEFAULT_STATION_RADIUS_M)
 
     # Find nearest station to destination
     dest_stations = []
     if dest_lat and dest_long:
-        dest_stations = await _find_nearest_station(dest_lat, dest_long, radius=2000)
+        dest_stations = await _find_nearest_station(dest_lat, dest_long, radius=DEFAULT_STATION_RADIUS_M)
 
     if prop_stations and dest_stations and resolved_city:
         # Try to find a shared transit line

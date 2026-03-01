@@ -69,7 +69,8 @@ async def upload_media_from_url(
                 resp = await client.get(image_url)
                 resp.raise_for_status()
                 file_data = resp.content
-        except Exception:
+        except Exception as e:
+            logger.warning("Image download failed for %s: %s", image_url[:80], e)
             return None
 
         content_type = "image/jpeg"

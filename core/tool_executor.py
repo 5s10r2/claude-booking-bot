@@ -1,6 +1,7 @@
 from typing import Any, Callable
 
 from core.log import get_logger
+from utils.properties import find_property
 
 logger = get_logger("core.tool_executor")
 
@@ -25,14 +26,7 @@ def _build_fallback(tool_name: str, tool_input: dict, user_id: str, error: str) 
         return f"Error executing {tool_name}: {error}"
 
     try:
-        from db.redis_store import get_property_info_map
-        info_map = get_property_info_map(user_id)
-        prop = None
-        for p in info_map:
-            if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-                prop = p
-                break
-
+        prop = find_property(user_id, property_name)
         if not prop:
             return f"Error executing {tool_name}: {error}"
 
@@ -53,7 +47,8 @@ def _build_fallback(tool_name: str, tool_input: dict, user_id: str, error: str) 
             parts.append(f"Link: {prop['property_link']}")
         parts.append("Suggest: schedule a call to get more details directly from the property.")
         return "\n".join(parts)
-    except Exception:
+    except Exception as e:
+        logger.warning("Fallback lookup failed for %s: %s", tool_name, e)
         return f"Error executing {tool_name}: {error}"
 
 

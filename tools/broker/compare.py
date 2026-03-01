@@ -11,21 +11,11 @@ import httpx
 
 from config import settings
 from core.log import get_logger
-from db.redis_store import get_property_info_map, get_preferences, get_user_memory
+from db.redis_store import get_preferences, get_user_memory
+from utils.properties import find_property as _find_property
 from utils.scoring import match_score as calc_match_score
 
 logger = get_logger("tools.compare")
-
-
-def _find_property(user_id: str, property_name: str) -> dict | None:
-    info_map = get_property_info_map(user_id)
-    for p in info_map:
-        if p.get("property_name", "").strip().lower() == property_name.strip().lower():
-            return p
-    for p in info_map:
-        if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-            return p
-    return None
 
 
 async def _fetch_details(prop_id: str) -> dict:
@@ -90,7 +80,11 @@ async def compare_properties(
         tasks.append(_fetch_details(prop_id))
         tasks.append(_fetch_rooms(eazypg_id))
 
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            logger.warning("compare fetch task %d failed: %s", i, r)
+            results[i] = {} if i % 2 == 0 else []  # details={}, rooms=[]
 
     # Build comparison data
     prefs = get_preferences(user_id)

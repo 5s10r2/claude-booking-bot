@@ -11,6 +11,10 @@ from core.tool_executor import ToolExecutor
 
 logger = get_logger("core.claude")
 
+MAX_TOOL_ROUNDS = 15
+MAX_TOKENS_RESPONSE = 4096
+MAX_TOKENS_CLASSIFY = 256
+
 
 class AnthropicEngine:
     def __init__(self, tool_executor: ToolExecutor):
@@ -69,10 +73,13 @@ class AnthropicEngine:
                 results = await asyncio.gather(*[
                     self.tool_executor.execute(b.name, b.input, user_id)
                     for b in tool_blocks
-                ])
+                ], return_exceptions=True)
 
                 tool_results = []
                 for block, result in zip(tool_blocks, results):
+                    if isinstance(result, Exception):
+                        logger.warning("tool %s failed: %s", block.name, result)
+                        result = f"Error executing {block.name}: {result}"
                     logger.debug("tool result: %s → %s", block.name, str(result)[:300])
                     tool_results.append({
                         "type": "tool_result",
@@ -130,7 +137,7 @@ class AnthropicEngine:
 
             kwargs = {
                 "model": model,
-                "max_tokens": 4096,
+                "max_tokens": MAX_TOKENS_RESPONSE,
                 "system": system,
                 "messages": messages,
             }
@@ -202,10 +209,13 @@ class AnthropicEngine:
                 results = await asyncio.gather(*[
                     executor.execute(b.name, b.input, user_id)
                     for b in tool_blocks
-                ])
+                ], return_exceptions=True)
 
                 tool_results = []
                 for block, result in zip(tool_blocks, results):
+                    if isinstance(result, Exception):
+                        logger.warning("stream tool %s failed: %s", block.name, result)
+                        result = f"Error executing {block.name}: {result}"
                     logger.debug("stream tool result: %s → %s", block.name, str(result)[:200])
                     yield {"event": "tool_done", "data": {"tool": block.name}}
                     tool_results.append({
@@ -239,7 +249,7 @@ class AnthropicEngine:
             try:
                 response = await self.client.messages.create(
                     model=model,
-                    max_tokens=256,
+                    max_tokens=MAX_TOKENS_CLASSIFY,
                     system=system,
                     messages=messages,
                 )
@@ -266,7 +276,7 @@ class AnthropicEngine:
             try:
                 kwargs = {
                     "model": model,
-                    "max_tokens": 4096,
+                    "max_tokens": MAX_TOKENS_RESPONSE,
                     "system": system,
                     "messages": messages,
                 }

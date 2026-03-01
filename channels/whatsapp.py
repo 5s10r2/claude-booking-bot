@@ -164,7 +164,8 @@ async def send_carousel(user_id: str, property_template: list) -> dict:
                 media_id = await upload_media_from_url(fallback_image, config)
             image_ids.append(media_id)
             image_urls.append(img_url)
-        except Exception:
+        except Exception as e:
+            logger.warning("carousel image upload failed: %s", e)
             image_ids.append(None)
             image_urls.append(fallback_image)
 

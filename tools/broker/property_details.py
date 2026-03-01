@@ -2,17 +2,8 @@ import httpx
 
 from config import settings
 from db.redis_store import get_property_info_map, set_property_info_map, track_funnel
-
-
-def _find_property(user_id: str, property_name: str) -> dict | None:
-    info_map = get_property_info_map(user_id)
-    for p in info_map:
-        if p.get("property_name", "").strip().lower() == property_name.strip().lower():
-            return p
-    for p in info_map:
-        if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-            return p
-    return None
+from utils.api import check_rentok_response
+from utils.properties import find_property as _find_property
 
 
 async def fetch_property_details(user_id: str, property_name: str, **kwargs) -> str:
@@ -32,6 +23,7 @@ async def fetch_property_details(user_id: str, property_name: str, **kwargs) -> 
             )
             resp.raise_for_status()
             data = resp.json()
+            check_rentok_response(data, "property-details-bots")
     except Exception as e:
         return f"Error fetching property details: {str(e)}"
 
