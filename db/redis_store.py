@@ -488,6 +488,65 @@ def track_agent_usage(user_id: str, agent_name: str) -> None:
     _r().expire(key, ANALYTICS_TTL)
 
 
+def track_agent_metrics(
+    agent_name: str,
+    *,
+    tool_calls: int = 0,
+    tool_errors: int = 0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> None:
+    """Track per-agent reliability metrics. Called after each agent turn."""
+    from datetime import date
+    day = date.today().isoformat()
+    pipe = _r().pipeline()
+    if tool_calls:
+        pipe.hincrby(f"metrics:{day}:tool_calls", agent_name, tool_calls)
+        pipe.expire(f"metrics:{day}:tool_calls", ANALYTICS_TTL)
+    if tool_errors:
+        pipe.hincrby(f"metrics:{day}:tool_errors", agent_name, tool_errors)
+        pipe.expire(f"metrics:{day}:tool_errors", ANALYTICS_TTL)
+    if input_tokens:
+        pipe.hincrby(f"metrics:{day}:tokens_in", agent_name, input_tokens)
+        pipe.expire(f"metrics:{day}:tokens_in", ANALYTICS_TTL)
+    if output_tokens:
+        pipe.hincrby(f"metrics:{day}:tokens_out", agent_name, output_tokens)
+        pipe.expire(f"metrics:{day}:tokens_out", ANALYTICS_TTL)
+    pipe.execute()
+
+
+def get_agent_metrics(day: str = None) -> dict:
+    """Return per-agent metrics for a given day. Returns nested dict:
+    {agent: {tool_calls, tool_errors, tokens_in, tokens_out, failure_rate}}
+    """
+    if day is None:
+        from datetime import date
+        day = date.today().isoformat()
+
+    def _read_hash(suffix: str) -> dict[str, int]:
+        raw = _r().hgetall(f"metrics:{day}:{suffix}")
+        return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
+
+    calls = _read_hash("tool_calls")
+    errors = _read_hash("tool_errors")
+    tokens_in = _read_hash("tokens_in")
+    tokens_out = _read_hash("tokens_out")
+
+    agents = set(calls) | set(errors) | set(tokens_in) | set(tokens_out)
+    result = {}
+    for a in agents:
+        tc = calls.get(a, 0)
+        te = errors.get(a, 0)
+        result[a] = {
+            "tool_calls": tc,
+            "tool_errors": te,
+            "failure_rate": round(te / tc, 3) if tc > 0 else 0.0,
+            "tokens_in": tokens_in.get(a, 0),
+            "tokens_out": tokens_out.get(a, 0),
+        }
+    return result
+
+
 def get_agent_usage(day: str = None) -> dict[str, int]:
     """Return {agent: count} for a given day (default: today)."""
     if day is None:

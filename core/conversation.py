@@ -14,12 +14,14 @@ class ConversationManager:
     async def add_user_message_with_summary(self, user_id: str, content: str) -> list[dict]:
         """Add user message and run summarization if conversation is long.
 
+        Pipeline: append → compact old tool results → summarize if needed → save.
         Returns the (potentially compacted) message list ready for Claude.
         """
-        from core.summarizer import maybe_summarize
+        from core.summarizer import maybe_summarize, compact_tool_results
 
         messages = self.get_history(user_id)
         messages.append({"role": "user", "content": content})
+        messages = compact_tool_results(messages)
         messages = await maybe_summarize(messages, user_id)
         save_conversation(user_id, messages)
         return messages

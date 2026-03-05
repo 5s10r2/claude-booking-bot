@@ -28,10 +28,14 @@ class AnthropicEngine:
         messages: list[dict],
         model: str,
         user_id: str,
+        tool_executor: ToolExecutor | None = None,
         max_iterations: int = None,
+        agent_name: str = "",
     ) -> str:
         if max_iterations is None:
             max_iterations = settings.MAX_AGENT_ITERATIONS
+
+        executor = tool_executor or self.tool_executor
 
         system = [
             {
@@ -48,14 +52,26 @@ class AnthropicEngine:
                 t["cache_control"] = {"type": "ephemeral"}
             cached_tools.append(t)
 
+        # Metrics accumulators
+        total_tool_calls = 0
+        total_tool_errors = 0
+        total_input_tokens = 0
+        total_output_tokens = 0
+
         for iteration in range(max_iterations):
             response = await self._call_api(model, system, cached_tools, messages)
             if response is None:
                 return "I'm experiencing a temporary issue. Please try again."
 
+            # Accumulate token usage
+            if hasattr(response, "usage") and response.usage:
+                total_input_tokens += getattr(response.usage, "input_tokens", 0)
+                total_output_tokens += getattr(response.usage, "output_tokens", 0)
+
             logger.debug("iteration %d/%d | stop_reason=%s", iteration + 1, max_iterations, response.stop_reason)
 
             if response.stop_reason == "end_turn":
+                self._emit_metrics(agent_name, total_tool_calls, total_tool_errors, total_input_tokens, total_output_tokens)
                 return self._extract_text(response)
 
             if response.stop_reason == "tool_use":
@@ -66,12 +82,13 @@ class AnthropicEngine:
 
                 # Collect all tool_use blocks and execute in parallel
                 tool_blocks = [b for b in response.content if b.type == "tool_use"]
+                total_tool_calls += len(tool_blocks)
 
                 for b in tool_blocks:
                     logger.info("tool call: %s | input=%s", b.name, b.input)
 
                 results = await asyncio.gather(*[
-                    self.tool_executor.execute(b.name, b.input, user_id)
+                    executor.execute(b.name, b.input, user_id)
                     for b in tool_blocks
                 ], return_exceptions=True)
 
@@ -79,7 +96,10 @@ class AnthropicEngine:
                 for block, result in zip(tool_blocks, results):
                     if isinstance(result, Exception):
                         logger.warning("tool %s failed: %s", block.name, result)
+                        total_tool_errors += 1
                         result = f"Error executing {block.name}: {result}"
+                    elif str(result).startswith("Error"):
+                        total_tool_errors += 1
                     logger.debug("tool result: %s → %s", block.name, str(result)[:300])
                     tool_results.append({
                         "type": "tool_result",
@@ -90,9 +110,28 @@ class AnthropicEngine:
                 messages.append({"role": "user", "content": tool_results})
                 continue
 
+            self._emit_metrics(agent_name, total_tool_calls, total_tool_errors, total_input_tokens, total_output_tokens)
             return self._extract_text(response)
 
+        self._emit_metrics(agent_name, total_tool_calls, total_tool_errors, total_input_tokens, total_output_tokens)
         return "I'm having trouble processing this request. Could you rephrase?"
+
+    @staticmethod
+    def _emit_metrics(agent_name: str, tool_calls: int, tool_errors: int, tokens_in: int, tokens_out: int):
+        """Fire-and-forget metrics to Redis."""
+        if not agent_name:
+            return
+        try:
+            from db.redis_store import track_agent_metrics
+            track_agent_metrics(
+                agent_name,
+                tool_calls=tool_calls,
+                tool_errors=tool_errors,
+                input_tokens=tokens_in,
+                output_tokens=tokens_out,
+            )
+        except Exception as e:
+            logger.debug("metrics emit failed (non-critical): %s", e)
 
     # ------------------------------------------------------------------
     # Streaming variant — yields SSE event dicts
@@ -107,6 +146,7 @@ class AnthropicEngine:
         user_id: str,
         tool_executor: ToolExecutor | None = None,
         max_iterations: int | None = None,
+        agent_name: str = "",
     ) -> AsyncGenerator[dict, None]:
         """Streaming version of run_agent. Yields dicts like
         {"event": "content_delta", "data": {"text": "…"}} that the
@@ -116,6 +156,12 @@ class AnthropicEngine:
             max_iterations = settings.MAX_AGENT_ITERATIONS
 
         executor = tool_executor or self.tool_executor
+
+        # Metrics accumulators
+        total_tool_calls = 0
+        total_tool_errors = 0
+        total_input_tokens = 0
+        total_output_tokens = 0
 
         system = [
             {
@@ -193,7 +239,13 @@ class AnthropicEngine:
 
             logger.debug("stream stop_reason=%s", response.stop_reason)
 
+            # Accumulate token usage
+            if hasattr(response, "usage") and response.usage:
+                total_input_tokens += getattr(response.usage, "input_tokens", 0)
+                total_output_tokens += getattr(response.usage, "output_tokens", 0)
+
             if response.stop_reason == "end_turn":
+                self._emit_metrics(agent_name, total_tool_calls, total_tool_errors, total_input_tokens, total_output_tokens)
                 return  # all text already streamed via content_delta events
 
             if response.stop_reason == "tool_use":
@@ -205,6 +257,7 @@ class AnthropicEngine:
 
                 # Execute all tool calls in parallel
                 tool_blocks = [b for b in response.content if b.type == "tool_use"]
+                total_tool_calls += len(tool_blocks)
 
                 results = await asyncio.gather(*[
                     executor.execute(b.name, b.input, user_id)
@@ -215,7 +268,10 @@ class AnthropicEngine:
                 for block, result in zip(tool_blocks, results):
                     if isinstance(result, Exception):
                         logger.warning("stream tool %s failed: %s", block.name, result)
+                        total_tool_errors += 1
                         result = f"Error executing {block.name}: {result}"
+                    elif str(result).startswith("Error"):
+                        total_tool_errors += 1
                     logger.debug("stream tool result: %s → %s", block.name, str(result)[:200])
                     yield {"event": "tool_done", "data": {"tool": block.name}}
                     tool_results.append({
@@ -228,6 +284,7 @@ class AnthropicEngine:
                 continue
 
             # Unexpected stop reason — text was already streamed
+            self._emit_metrics(agent_name, total_tool_calls, total_tool_errors, total_input_tokens, total_output_tokens)
             return
 
     async def classify(

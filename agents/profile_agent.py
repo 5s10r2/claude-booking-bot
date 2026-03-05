@@ -20,7 +20,6 @@ def get_config(user_id: str, language: str = "en") -> dict:
         language=language,
         brand_name=account.get("brand_name", "our platform"),
         cities=account.get("cities", ""),
-        areas=account.get("areas", ""),
         today_date=today_date(),
         current_day=current_day(),
     )
@@ -41,20 +40,18 @@ async def run(
     user_id: str,
     language: str = "en",
 ) -> str:
+    from core.summarizer import scope_messages_for_agent
+
     cfg = get_config(user_id, language=language)
+    scoped = scope_messages_for_agent(messages, "profile")
 
-    original_executor = engine.tool_executor
-    engine.tool_executor = cfg["executor"]
-
-    try:
-        response = await engine.run_agent(
-            system_prompt=cfg["system_prompt"],
-            tools=cfg["tools"],
-            messages=messages,
-            model=cfg["model"],
-            user_id=user_id,
-        )
-    finally:
-        engine.tool_executor = original_executor
-
+    response = await engine.run_agent(
+        system_prompt=cfg["system_prompt"],
+        tools=cfg["tools"],
+        messages=scoped,
+        model=cfg["model"],
+        user_id=user_id,
+        tool_executor=cfg["executor"],
+        agent_name="profile",
+    )
     return response

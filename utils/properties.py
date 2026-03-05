@@ -12,8 +12,10 @@ def find_property(user_id: str, property_name: str) -> dict | None:
     for p in info_map:
         if p.get("property_name", "").strip().lower() == name_lower:
             return p
-    # Substring match fallback
+    # Substring match fallback — input may be verbose (e.g. "Name | Operator")
+    # so check both directions: stored-in-input and input-in-stored
     for p in info_map:
-        if name_lower in p.get("property_name", "").strip().lower():
+        stored = p.get("property_name", "").strip().lower()
+        if stored in name_lower or name_lower in stored:
             return p
     return None

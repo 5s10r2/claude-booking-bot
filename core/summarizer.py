@@ -25,6 +25,164 @@ KEEP_RECENT = getattr(settings, "SUMMARIZE_KEEP_RECENT", 10)
 SUMMARY_TAG_OPEN = "[CONVERSATION_SUMMARY]"
 SUMMARY_TAG_CLOSE = "[/CONVERSATION_SUMMARY]"
 MAX_TOOL_RESULT_CHARS = 300  # truncate long tool results before summarizing
+COMPACT_THRESHOLD = 500  # compact tool results larger than this (chars)
+KEEP_RECENT_FOR_COMPACT = 6  # keep this many recent messages untouched
+
+# ---------------------------------------------------------------------------
+# Tool result compaction (runs BEFORE summarization)
+# ---------------------------------------------------------------------------
+
+
+def _find_tool_name(messages: list[dict], tool_use_id: str) -> str:
+    """Find the tool name for a tool_use_id by scanning assistant messages."""
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if (isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("id") == tool_use_id):
+                return block.get("name", "")
+    return ""
+
+
+def _compact_result(tool_name: str, content: str) -> str:
+    """Generate a compact summary of a tool result based on tool type."""
+    if tool_name == "search_properties":
+        lines = content.split("\n")
+        header = lines[0] if lines else "Search completed"
+        names = []
+        for line in lines[1:6]:
+            if line.startswith("- "):
+                name = line.split("|")[0].replace("- ", "").strip()
+                if name:
+                    names.append(name)
+        name_str = ", ".join(names[:5])
+        return f"[Compacted] {header}\nTop matches: {name_str}. Full data cached — use property names to reference."
+
+    if tool_name in ("fetch_property_details", "fetch_room_details"):
+        return f"[Compacted] {content[:200]}... Full details cached."
+
+    if tool_name == "fetch_property_images":
+        url_count = content.count("http")
+        return f"[Compacted] {url_count} image URLs retrieved. Cached for display."
+
+    if tool_name in ("fetch_landmarks", "estimate_commute", "fetch_nearby_places"):
+        return f"[Compacted] {content[:200]}... Full location data cached."
+
+    if tool_name == "compare_properties":
+        return f"[Compacted] Comparison table generated. {content[:150]}..."
+
+    if tool_name == "web_search":
+        return f"[Compacted] Web search results: {content[:200]}..."
+
+    # Generic compaction
+    return f"[Compacted] {content[:200]}..."
+
+
+def compact_tool_results(
+    messages: list[dict],
+    keep_recent: int = KEEP_RECENT_FOR_COMPACT,
+) -> list[dict]:
+    """Compact verbose tool results in older messages to reduce context size.
+
+    Runs BEFORE summarization. Keeps recent messages untouched since the agent
+    may still reference them. For older tool_result blocks exceeding
+    COMPACT_THRESHOLD chars, replaces the content with a compact summary that
+    preserves just enough info (property names, counts) for continuity.
+    """
+    if len(messages) <= keep_recent:
+        return messages
+
+    older = messages[:-keep_recent]
+    recent = messages[-keep_recent:]
+    compacted = []
+    total_saved = 0
+
+    for msg in older:
+        content = msg.get("content")
+        if msg.get("role") != "user" or not isinstance(content, list):
+            compacted.append(msg)
+            continue
+
+        new_blocks = []
+        for block in content:
+            if (isinstance(block, dict)
+                    and block.get("type") == "tool_result"
+                    and len(str(block.get("content", ""))) > COMPACT_THRESHOLD):
+                tool_name = _find_tool_name(older, block.get("tool_use_id", ""))
+                original = str(block.get("content", ""))
+                compact = _compact_result(tool_name, original)
+                total_saved += len(original) - len(compact)
+                new_blocks.append({**block, "content": compact})
+            else:
+                new_blocks.append(block)
+
+        compacted.append({**msg, "content": new_blocks})
+
+    if total_saved > 0:
+        logger.info("compaction saved ~%d chars from older tool results", total_saved)
+
+    return compacted + recent
+
+
+# Tools that belong to the broker agent — their results are noise for other agents
+_BROKER_TOOLS = {
+    "search_properties", "fetch_property_details", "fetch_room_details",
+    "fetch_property_images", "fetch_landmarks", "estimate_commute",
+    "fetch_nearby_places", "compare_properties", "shortlist_property",
+    "save_preferences", "fetch_properties_by_query",
+}
+
+
+def scope_messages_for_agent(messages: list[dict], agent_name: str) -> list[dict]:
+    """Apply agent-specific context scoping.
+
+    Broker agent gets messages as-is (it needs full property data).
+    Other agents get more aggressive compaction of broker tool results
+    since they never reference property JSON directly.
+
+    Returns a new list — does NOT modify the stored conversation.
+    """
+    if agent_name == "broker":
+        return messages
+
+    AGGRESSIVE_THRESHOLD = 200
+    scoped = []
+    total_saved = 0
+
+    for msg in messages:
+        content = msg.get("content")
+        if msg.get("role") != "user" or not isinstance(content, list):
+            scoped.append(msg)
+            continue
+
+        new_blocks = []
+        for block in content:
+            if (isinstance(block, dict)
+                    and block.get("type") == "tool_result"
+                    and len(str(block.get("content", ""))) > AGGRESSIVE_THRESHOLD):
+                tool_name = _find_tool_name(messages, block.get("tool_use_id", ""))
+                if tool_name in _BROKER_TOOLS:
+                    original = str(block.get("content", ""))
+                    compact = f"[Property data — handled by broker agent. {original[:100]}...]"
+                    total_saved += len(original) - len(compact)
+                    new_blocks.append({**block, "content": compact})
+                else:
+                    new_blocks.append(block)
+            else:
+                new_blocks.append(block)
+
+        scoped.append({**msg, "content": new_blocks})
+
+    if total_saved > 0:
+        logger.info("agent scoping (%s) saved ~%d chars from broker tool results", agent_name, total_saved)
+
+    return scoped
+
 
 # ---------------------------------------------------------------------------
 # Summarization prompt

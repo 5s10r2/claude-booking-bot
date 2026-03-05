@@ -15,8 +15,11 @@ async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
             prop = p
             break
     if not prop:
+        name_lower = property_name.strip().lower()
         for p in info_map:
-            if property_name.strip().lower() in p.get("property_name", "").strip().lower():
+            stored = p.get("property_name", "").strip().lower()
+            # Match if input contains stored name OR stored name contains input
+            if stored in name_lower or name_lower in stored:
                 prop = p
                 break
 

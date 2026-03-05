@@ -174,7 +174,7 @@ async def fetch_landmarks(user_id: str, landmark_name: str, property_name: str, 
 
     try:
         dist_data = await http_get(
-            f"http://maps.rentok.com/table/v1/driving/{prop_long},{prop_lat};{landmark_long},{landmark_lat}",
+            f"https://maps.rentok.com/table/v1/driving/{prop_long},{prop_lat};{landmark_long},{landmark_lat}",
             params={"sources": "0", "api_key": settings.OSRM_API_KEY},
         )
     except Exception as e:
@@ -226,7 +226,7 @@ async def estimate_commute(
     if dest_lat and dest_long:
         try:
             dist_data = await http_get(
-                f"http://maps.rentok.com/table/v1/driving/{prop_long},{prop_lat};{dest_long},{dest_lat}",
+                f"https://maps.rentok.com/table/v1/driving/{prop_long},{prop_lat};{dest_long},{dest_lat}",
                 params={"sources": "0", "api_key": settings.OSRM_API_KEY},
             )
             durations = dist_data.get("durations", [[]])

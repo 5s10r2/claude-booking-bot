@@ -43,7 +43,7 @@ async def run(
         }
     ]
 
-    response = engine._call_api(
+    response = await engine._call_api(
         model=settings.HAIKU_MODEL,
         system=[{"type": "text", "text": ROOM_AGENT_PROMPT}],
         tools=[],

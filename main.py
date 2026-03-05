@@ -61,6 +61,7 @@ from db.redis_store import (
     get_user_memory,
     update_user_memory,
     get_user_phone,
+    save_conversation,
 )
 from agents import supervisor, default_agent, broker_agent, booking_agent, profile_agent, room_agent
 from channels.whatsapp import send_text, send_carousel, send_images
@@ -205,8 +206,10 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     # Track last active agent for multi-turn continuations
     set_last_agent(user_id, agent_name)
 
-    # Save assistant response to history
-    conversation.add_assistant_message(user_id, response)
+    # Save full conversation (tool_use + tool_result blocks + final response)
+    # so compact_tool_results() can compact old tool results on future turns.
+    messages.append({"role": "assistant", "content": response})
+    save_conversation(user_id, messages)
 
     return response, agent_name, language
 
@@ -334,6 +337,10 @@ async def chat_stream(req: ChatRequest):
     get_cfg = config_map.get(agent_name, default_agent.get_config)
     cfg = get_cfg(req.user_id, language=language)
 
+    # Scope conversation context for the active agent
+    from core.summarizer import scope_messages_for_agent
+    scoped_messages = scope_messages_for_agent(messages, agent_name)
+
     async def event_generator():
         # Emit agent_start so frontend knows which agent is handling + locale
         yield f"event: agent_start\ndata: {json.dumps({'agent': agent_name, 'locale': language})}\n\n"
@@ -343,10 +350,11 @@ async def chat_stream(req: ChatRequest):
             async for ev in engine.run_agent_stream(
                 system_prompt=cfg["system_prompt"],
                 tools=cfg["tools"],
-                messages=messages,
+                messages=scoped_messages,
                 model=cfg["model"],
                 user_id=req.user_id,
                 tool_executor=cfg["executor"],
+                agent_name=agent_name,
             ):
                 yield f"event: {ev['event']}\ndata: {json.dumps(ev['data'])}\n\n"
                 if ev["event"] == "content_delta":
@@ -787,11 +795,28 @@ async def admin_analytics(time_range: str = "7d"):
     except Exception as e:
         logger.warning("rate limit status fetch failed: %s", e)
 
+    # --- Agent reliability metrics: aggregate across date range ---
+    from db.redis_store import get_agent_metrics
+    metrics_totals: dict[str, dict] = {}
+    for i in range(days):
+        day = (today - timedelta(days=i)).isoformat()
+        day_metrics = get_agent_metrics(day)
+        for agent, m in day_metrics.items():
+            if agent not in metrics_totals:
+                metrics_totals[agent] = {"tool_calls": 0, "tool_errors": 0, "tokens_in": 0, "tokens_out": 0}
+            for k in ("tool_calls", "tool_errors", "tokens_in", "tokens_out"):
+                metrics_totals[agent][k] += m.get(k, 0)
+    # Compute failure rates
+    for agent, m in metrics_totals.items():
+        tc = m["tool_calls"]
+        m["failure_rate"] = round(m["tool_errors"] / tc, 3) if tc > 0 else 0.0
+
     return {
         "funnel": funnel_totals,
         "feedback": feedback,
         "messages": message_volume,
         "agents": agent_totals,
+        "agent_metrics": metrics_totals,
         "rate_limits": rate_limits,
         "meta": {
             "range": time_range,
