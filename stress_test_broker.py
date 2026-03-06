@@ -174,9 +174,11 @@ SCENARIOS = [
             Turn(
                 message="Show me PGs in Andheri",
                 agent_is="broker",
-                must_have=[r"rent|₹", r"andheri"],
+                # Dynamic skills: bot may qualify first (asking gender/budget) OR show results directly.
+                # "andheri" is always mentioned either way. ₹/rent only appears if results shown.
+                must_have=[r"andheri"],
                 must_not_have=[r"no properties found", r"error", r"can't help"],
-                nice_to_have=[r"visit|shortlist|schedule|book"],
+                nice_to_have=[r"rent|₹", r"boys|girls|mixed|budget|gender", r"visit|shortlist|schedule|book"],
             ),
         ],
     ),
