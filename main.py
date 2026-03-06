@@ -58,6 +58,9 @@ from db.redis_store import (
     get_user_language,
     track_agent_usage,
     get_agent_usage,
+    track_skill_usage,
+    get_skill_usage,
+    get_skill_misses,
     get_user_memory,
     update_user_memory,
     get_user_phone,
@@ -180,27 +183,40 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     # Load conversation history + summarize if needed
     messages = await conversation.add_user_message_with_summary(user_id, message)
 
-    # Step 1: Supervisor routes to agent
-    agent_name = await supervisor.route(engine, messages)
+    # Step 1: Supervisor routes to agent + detects skills
+    route_result = await supervisor.route(engine, messages)
+    agent_name = route_result["agent"]
+    skills = route_result.get("skills", [])
 
     # Safety net: keyword-based override if supervisor misclassifies
+    original_agent = agent_name
     agent_name = apply_keyword_safety_net(agent_name, message, user_id)
+    # If safety net changed the agent, skills are no longer valid
+    if agent_name != original_agent:
+        skills = []
+    # Keyword fallback for broker skill detection
+    if agent_name == "broker" and not skills:
+        from skills.skill_map import detect_skills_heuristic
+        skills = detect_skills_heuristic(message)
 
     logger.info("user=%s agent=%s lang=%s msg=%s", user_id, agent_name, language, message[:60])
 
-    # Track agent usage for analytics
+    # Track agent usage + skill usage for analytics
     track_agent_usage(user_id, agent_name)
+    if skills:
+        track_skill_usage(skills)
 
-    # Step 2: Run selected agent (with language)
-    agent_map = {
-        "default": default_agent.run,
-        "broker": broker_agent.run,
-        "booking": booking_agent.run,
-        "profile": profile_agent.run,
-    }
-
-    agent_fn = agent_map.get(agent_name, default_agent.run)
-    response = await agent_fn(engine, messages, user_id, language=language)
+    # Step 2: Run selected agent (with language + skills for broker)
+    if agent_name == "broker":
+        response = await broker_agent.run(engine, messages, user_id, language=language, skills=skills)
+    else:
+        agent_map = {
+            "default": default_agent.run,
+            "booking": booking_agent.run,
+            "profile": profile_agent.run,
+        }
+        agent_fn = agent_map.get(agent_name, default_agent.run)
+        response = await agent_fn(engine, messages, user_id, language=language)
 
     # Track last active agent for multi-turn continuations
     set_last_agent(user_id, agent_name)
@@ -280,10 +296,10 @@ async def chat(req: ChatRequest):
 # SSE streaming endpoint
 # ---------------------------------------------------------------------------
 
-async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict], str]:
-    """Shared routing logic: returns (agent_name, messages, language).
+async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict], str, list[str]]:
+    """Shared routing logic: returns (agent_name, messages, language, skills).
 
-    Applies supervisor + keyword safety net + last-agent fallback —
+    Applies supervisor + keyword safety net + last-agent fallback + skill detection —
     identical to run_pipeline but without running the agent itself.
     """
     # Detect language
@@ -295,16 +311,28 @@ async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict], str
 
     messages = await conversation.add_user_message_with_summary(user_id, message)
 
-    agent_name = await supervisor.route(engine, messages)
+    route_result = await supervisor.route(engine, messages)
+    agent_name = route_result["agent"]
+    skills = route_result.get("skills", [])
 
     # Safety net: keyword-based override if supervisor misclassifies
+    original_agent = agent_name
     agent_name = apply_keyword_safety_net(agent_name, message, user_id)
+    # If safety net changed the agent, skills are no longer valid
+    if agent_name != original_agent:
+        skills = []
+    # Keyword fallback for broker skill detection
+    if agent_name == "broker" and not skills:
+        from skills.skill_map import detect_skills_heuristic
+        skills = detect_skills_heuristic(message)
 
-    # Track agent usage for analytics
+    # Track agent usage + skill usage for analytics
     track_agent_usage(user_id, agent_name)
+    if skills:
+        track_skill_usage(skills)
 
-    logger.info("user=%s agent=%s lang=%s msg=%s", user_id, agent_name, language, message[:60])
-    return agent_name, messages, language
+    logger.info("user=%s agent=%s lang=%s skills=%s msg=%s", user_id, agent_name, language, skills, message[:60])
+    return agent_name, messages, language, skills
 
 
 @app.post("/chat/stream", dependencies=[Depends(verify_api_key)])
@@ -321,18 +349,20 @@ async def chat_stream(req: ChatRequest):
         if pg_ids:
             set_whitelabel_pg_ids(req.user_id, pg_ids)
 
-    # Route to the correct agent (fast — Haiku + keyword fallback)
-    agent_name, messages, language = await _route_agent(req.user_id, req.message)
+    # Route to the correct agent (fast — Haiku + keyword fallback + skill detection)
+    agent_name, messages, language, skills = await _route_agent(req.user_id, req.message)
 
-    # Get agent config (with language for prompt injection)
-    config_map = {
-        "default": default_agent.get_config,
-        "broker": broker_agent.get_config,
-        "booking": booking_agent.get_config,
-        "profile": profile_agent.get_config,
-    }
-    get_cfg = config_map.get(agent_name, default_agent.get_config)
-    cfg = get_cfg(req.user_id, language=language)
+    # Get agent config (with language + skills for broker)
+    if agent_name == "broker":
+        cfg = broker_agent.get_config(req.user_id, language=language, skills=skills)
+    else:
+        config_map = {
+            "default": default_agent.get_config,
+            "booking": booking_agent.get_config,
+            "profile": profile_agent.get_config,
+        }
+        get_cfg = config_map.get(agent_name, default_agent.get_config)
+        cfg = get_cfg(req.user_id, language=language)
 
     async def event_generator():
         # Emit agent_start so frontend knows which agent is handling + locale
@@ -779,6 +809,18 @@ async def admin_analytics(time_range: str = "7d"):
         for agent, count in day_agents.items():
             agent_totals[agent] = agent_totals.get(agent, 0) + count
 
+    # --- Skill usage: aggregate across date range ---
+    skill_totals: dict[str, int] = {}
+    skill_miss_totals: dict[str, int] = {}
+    for i in range(days):
+        day = (today - timedelta(days=i)).isoformat()
+        day_skills = get_skill_usage(day)
+        for skill, count in day_skills.items():
+            skill_totals[skill] = skill_totals.get(skill, 0) + count
+        day_misses = get_skill_misses(day)
+        for tool, count in day_misses.items():
+            skill_miss_totals[tool] = skill_miss_totals.get(tool, 0) + count
+
     # --- Rate limit status (current snapshot) ---
     from core.rate_limiter import get_rate_limit_status
     rate_limits = {}
@@ -792,6 +834,8 @@ async def admin_analytics(time_range: str = "7d"):
         "feedback": feedback,
         "messages": message_volume,
         "agents": agent_totals,
+        "skills": skill_totals,
+        "skill_misses": skill_miss_totals,
         "rate_limits": rate_limits,
         "meta": {
             "range": time_range,

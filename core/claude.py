@@ -23,7 +23,7 @@ class AnthropicEngine:
 
     async def run_agent(
         self,
-        system_prompt: str,
+        system_prompt: str | list[str],
         tools: list[dict],
         messages: list[dict],
         model: str,
@@ -33,13 +33,7 @@ class AnthropicEngine:
         if max_iterations is None:
             max_iterations = settings.MAX_AGENT_ITERATIONS
 
-        system = [
-            {
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
+        system = self._build_system_blocks(system_prompt)
 
         cached_tools = []
         for i, tool in enumerate(tools):
@@ -100,7 +94,7 @@ class AnthropicEngine:
 
     async def run_agent_stream(
         self,
-        system_prompt: str,
+        system_prompt: str | list[str],
         tools: list[dict],
         messages: list[dict],
         model: str,
@@ -117,13 +111,7 @@ class AnthropicEngine:
 
         executor = tool_executor or self.tool_executor
 
-        system = [
-            {
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
+        system = self._build_system_blocks(system_prompt)
 
         cached_tools = []
         for i, tool in enumerate(tools):
@@ -293,6 +281,25 @@ class AnthropicEngine:
                     return None
                 await asyncio.sleep(1)
         return None
+
+    @staticmethod
+    def _build_system_blocks(system_prompt: str | list[str]) -> list[dict]:
+        """Build Anthropic API system blocks with cache_control.
+
+        Supports two formats:
+        - str: Single block, fully cached (legacy — all agents except dynamic broker)
+        - list[str]: Two blocks — first cached (base), second dynamic (NOT cached)
+        """
+        if isinstance(system_prompt, list):
+            blocks = [
+                {"type": "text", "text": system_prompt[0], "cache_control": {"type": "ephemeral"}},
+            ]
+            if len(system_prompt) > 1 and system_prompt[1]:
+                blocks.append({"type": "text", "text": system_prompt[1]})
+            return blocks
+        return [
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}},
+        ]
 
     @staticmethod
     def _extract_text(response) -> str:

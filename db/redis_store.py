@@ -498,6 +498,51 @@ def get_agent_usage(day: str = None) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Skill usage tracking (dynamic skills system)
+# ---------------------------------------------------------------------------
+
+def track_skill_usage(skills: list[str]) -> None:
+    """Increment skill usage counters for today. 90-day TTL."""
+    if not skills:
+        return
+    from datetime import date
+    day = date.today().isoformat()
+    key = f"skill_usage:{day}"
+    pipe = _r().pipeline(transaction=False)
+    for skill in skills:
+        pipe.hincrby(key, skill, 1)
+    pipe.expire(key, ANALYTICS_TTL)
+    pipe.execute()
+
+
+def track_skill_miss(tool_name: str) -> None:
+    """Increment counter when a tool is not in filtered set (skill detection miss). 90-day TTL."""
+    from datetime import date
+    day = date.today().isoformat()
+    key = f"skill_misses:{day}"
+    _r().hincrby(key, tool_name, 1)
+    _r().expire(key, ANALYTICS_TTL)
+
+
+def get_skill_usage(day: str = None) -> dict[str, int]:
+    """Return {skill: count} for a given day (default: today)."""
+    if day is None:
+        from datetime import date
+        day = date.today().isoformat()
+    raw = _r().hgetall(f"skill_usage:{day}")
+    return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
+
+
+def get_skill_misses(day: str = None) -> dict[str, int]:
+    """Return {tool_name: miss_count} for a given day (default: today)."""
+    if day is None:
+        from datetime import date
+        day = date.today().isoformat()
+    raw = _r().hgetall(f"skill_misses:{day}")
+    return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
+
+
+# ---------------------------------------------------------------------------
 # Funnel tracking (search → detail → shortlist → visit → booking)
 # ---------------------------------------------------------------------------
 

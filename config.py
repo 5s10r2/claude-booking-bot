@@ -43,6 +43,7 @@ class Settings(BaseSettings):
 
     # Feature flags
     KYC_ENABLED: bool = False  # Set KYC_ENABLED=true in env to re-enable Aadhaar verification
+    DYNAMIC_SKILLS_ENABLED: bool = True  # Dynamic skill loading for broker agent. Set false to fall back to monolithic prompt.
 
     # Agent settings
     MAX_AGENT_ITERATIONS: int = 15

@@ -36,7 +36,23 @@ IMPORTANT DISTINCTIONS:
 - "what visits do I have?" (QUERY about saved data) → profile
 - "tell me more about [property]" or "how far is X from Y?" → broker (property exploration)
 
-Respond with ONLY raw JSON, no markdown, no code fences, no backticks: {{"agent": "<agent_name>"}}"""
+BROKER SKILL DETECTION (only when agent is "broker"):
+Pick 1-3 skills most relevant to the user's CURRENT message:
+- "qualify_new" — New user, needs location/budget/gender/amenities
+- "qualify_returning" — Returning user, confirm if preferences still apply
+- "search" — Find/search properties
+- "details" — Property details, images, rooms for a specific property
+- "compare" — Compare properties side by side
+- "commute" — Distance, travel time, commute estimation
+- "shortlist" — Save/bookmark a property
+- "show_more" — Next batch of results, more options
+- "web_search" — Area info, neighborhood, market data
+- "selling" — Objection handling, value framing (pair with details/compare)
+- "learning" — User rejected properties or updated preferences
+
+Respond with ONLY raw JSON, no markdown, no code fences, no backticks:
+For broker: {{"agent": "broker", "skills": ["skill1", "skill2"]}}
+For others: {{"agent": "<agent_name>"}}"""
 
 DEFAULT_AGENT_PROMPT = """You are a friendly, warm assistant for {brand_name}, a property rental platform operating in {cities}.
 
