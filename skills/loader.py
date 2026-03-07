@@ -92,7 +92,12 @@ def build_skill_prompt(
     """Build a two-block system prompt from skill files.
 
     Returns (base_prompt, skill_prompt):
-        base_prompt  — Always cached (identity + format + rules). ~3,500+ chars.
+        base_prompt  — Marked for caching via cache_control: ephemeral in core/claude.py.
+                       Current size: ~3,800 chars ≈ ~950 tokens. Note: Haiku 4.5 requires
+                       ≥4,096 tokens for prompt caching to activate. With filtered tools
+                       (~600-1,200 tokens), total is ~1,550-2,150 tokens — below threshold.
+                       Cache silently skips on small turns; this is acceptable since token
+                       savings from loading fewer skills already offset the miss.
         skill_prompt — Dynamic per turn (instructions + examples for 2-4 skills). NOT cached.
 
     Template variables (e.g. {brand_name}, {language_directive}) are injected
