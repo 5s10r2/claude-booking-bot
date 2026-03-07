@@ -55,6 +55,7 @@ def _build_fallback(tool_name: str, tool_input: dict, user_id: str, error: str) 
 class ToolExecutor:
     def __init__(self):
         self._handlers: dict[str, Callable] = {}
+        self._fallback_handlers: dict[str, Callable] | None = None
 
     def register(self, name: str, handler: Callable) -> None:
         self._handlers[name] = handler
@@ -62,8 +63,33 @@ class ToolExecutor:
     def register_many(self, handlers: dict[str, Callable]) -> None:
         self._handlers.update(handlers)
 
+    def set_fallback(self, handlers: dict[str, Callable]) -> None:
+        """Set fallback handlers for graceful tool expansion on skill misses.
+
+        When a tool is not found in the primary handler set, the executor
+        checks the fallback set before returning an error. This ensures
+        Claude can still call any broker tool even if skill detection was wrong.
+        """
+        self._fallback_handlers = handlers
+
     async def execute(self, tool_name: str, tool_input: dict, user_id: str) -> str:
         handler = self._handlers.get(tool_name)
+        # Graceful expansion: if tool not in filtered set, try fallback
+        if handler is None and self._fallback_handlers:
+            handler = self._fallback_handlers.get(tool_name)
+            if handler:
+                logger.warning(
+                    "Skill miss: tool '%s' not in filtered set — expanding from fallback",
+                    tool_name,
+                )
+                # Track the miss for monitoring
+                try:
+                    from db.redis_store import track_skill_miss
+                    track_skill_miss(tool_name)
+                except Exception:
+                    pass  # Non-blocking — don't break tool execution
+                # Register for subsequent calls in this turn
+                self._handlers[tool_name] = handler
         if handler is None:
             return f"Error: Unknown tool '{tool_name}'"
         try:

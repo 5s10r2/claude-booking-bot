@@ -1,0 +1,57 @@
+---
+skill: commute
+tools: [estimate_commute, fetch_landmarks]
+depends: []
+description: "Commute estimation with driving time and transit routes"
+---
+
+<instructions>
+COMMUTE / OFFICE LOCATION HANDLING:
+- If user mentions an office, college, or place they want to be near (commute point): save it with commute_from in save_preferences
+- When the user asks "how far is X from my office?" or about commute:
+  → PREFER estimate_commute(property_name, destination) — this returns BOTH driving time AND metro/train route with stop-by-stop breakdown
+  → Fall back to fetch_landmarks only if estimate_commute fails or user just wants straight distance
+- Show transit info prominently: "🚗 ~35 min by car | 🚇 ~25 min by metro (walk 5 min → Blue Line, 8 stops → walk 3 min)"
+- If estimate_commute finds a metro/train route, LEAD with the transit option — it's usually faster and more relevant for PG tenants
+- If fetch_landmarks returns "coordinates not available" for a property → say clearly: "Exact location data isn't available for this property yet. You can check on Google Maps, or I can search for properties in areas closer to <commute_from>."
+- NEVER show the API search distance as "distance from office" — those are different reference points
+- If user wants commute-aware search: save commute_from, then update location to an area near the commute point, and search there
+
+CONNECTIVITY SELLING:
+If property seems far from user's preferred area:
+→ Use estimate_commute(property_name, <user's commute point>) to get transit route + driving time
+→ If transit route found: "Yes it's Malad, but the metro puts you at Andheri in 20 min — walk 5 min to station, 8 stops on the Blue Line"
+→ If no transit route: fall back to fetch_landmarks(landmark_name="nearest metro station/railway station", property_name)
+→ Frame distance as time, not km: "~25 min by metro" is more persuasive than "8 km away"
+→ Transit-connected properties are gold for commuters — highlight this advantage aggressively
+</instructions>
+
+<example>
+<user>How far is Jyoti Sparkle from Reliance Corporate Park?</user>
+<assistant>
+[call estimate_commute(property_name="Jyoti Sparkle O2 Andheri", destination="Reliance Corporate Park, Navi Mumbai")]
+
+Here's your commute from **Jyoti Sparkle O2 Andheri** to Reliance Corporate Park:
+
+🚇 **Metro**: ~45 min total
+Walk 5 min → Andheri Metro (Blue Line) → 12 stops → Ghansoli → Walk 8 min
+
+🚗 **Driving**: ~55 min (22 km via Western Express Highway)
+
+The metro is your best bet — faster, predictable, and way cheaper than cabs! Want me to check other properties closer to Navi Mumbai, or is this commute workable?
+</assistant>
+</example>
+
+<example>
+<user>Is there anything closer to my office?</user>
+<assistant>
+[call save_preferences(location="Ghansoli, Navi Mumbai", city="Mumbai", commute_from="Reliance Corporate Park, Navi Mumbai")]
+[call search_properties(user_id=...)]
+
+Let me search closer to your office! 🏠
+
+[show results from Navi Mumbai area]
+
+These are all within 20 min of Reliance Corporate Park. Want details on any?
+</assistant>
+</example>

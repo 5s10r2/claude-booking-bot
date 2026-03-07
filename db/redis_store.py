@@ -3,6 +3,7 @@ import pickle
 import hashlib
 import os
 import re
+from datetime import date
 from typing import Optional
 
 import redis
@@ -498,6 +499,51 @@ def get_agent_usage(day: str = None) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Skill usage tracking (dynamic skills system)
+# ---------------------------------------------------------------------------
+
+def track_skill_usage(skills: list[str]) -> None:
+    """Increment skill usage counters for today. 90-day TTL."""
+    if not skills:
+        return
+    from datetime import date
+    day = date.today().isoformat()
+    key = f"skill_usage:{day}"
+    pipe = _r().pipeline(transaction=False)
+    for skill in skills:
+        pipe.hincrby(key, skill, 1)
+    pipe.expire(key, ANALYTICS_TTL)
+    pipe.execute()
+
+
+def track_skill_miss(tool_name: str) -> None:
+    """Increment counter when a tool is not in filtered set (skill detection miss). 90-day TTL."""
+    from datetime import date
+    day = date.today().isoformat()
+    key = f"skill_misses:{day}"
+    _r().hincrby(key, tool_name, 1)
+    _r().expire(key, ANALYTICS_TTL)
+
+
+def get_skill_usage(day: str = None) -> dict[str, int]:
+    """Return {skill: count} for a given day (default: today)."""
+    if day is None:
+        from datetime import date
+        day = date.today().isoformat()
+    raw = _r().hgetall(f"skill_usage:{day}")
+    return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
+
+
+def get_skill_misses(day: str = None) -> dict[str, int]:
+    """Return {tool_name: miss_count} for a given day (default: today)."""
+    if day is None:
+        from datetime import date
+        day = date.today().isoformat()
+    raw = _r().hgetall(f"skill_misses:{day}")
+    return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
+
+
+# ---------------------------------------------------------------------------
 # Funnel tracking (search → detail → shortlist → visit → booking)
 # ---------------------------------------------------------------------------
 
@@ -754,8 +800,29 @@ def build_returning_user_context(user_id: str) -> str:
     if not mem.get("first_seen") or mem.get("session_count", 0) < 1:
         return ""
 
+    # Compute days since last interaction for freshness markers
+    days_since = 0
+    last_seen_str = mem.get("last_seen", "")
+    if last_seen_str:
+        try:
+            days_since = (date.today() - date.fromisoformat(last_seen_str)).days
+        except (ValueError, TypeError):
+            pass
+
     parts = []
     parts.append(f"RETURNING USER (session #{mem['session_count'] + 1}):")
+
+    # Freshness / staleness markers (prevents context distraction + poisoning)
+    if days_since > 30:
+        parts.append(
+            f"⚠️ STALE CONTEXT ({days_since} days since last visit): "
+            "Treat the following preferences as background only — re-qualify budget and location before searching."
+        )
+    elif days_since > 7:
+        parts.append(
+            f"Note: preferences last updated {days_since} days ago — "
+            "confirm budget/location are still current before searching."
+        )
 
     loc = mem.get("last_search_location", "")
     budget = mem.get("last_search_budget", "")

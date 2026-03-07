@@ -68,6 +68,16 @@ def get_all_handlers() -> dict[str, Callable]:
     return dict(_TOOL_HANDLERS)
 
 
+def get_schemas_by_names(tool_names: list[str]) -> list[dict]:
+    """Return schemas for specific tool names (for skill-based tool filtering)."""
+    return [_TOOL_SCHEMAS[n] for n in tool_names if n in _TOOL_SCHEMAS]
+
+
+def get_handlers_by_names(tool_names: list[str]) -> dict[str, Callable]:
+    """Return handlers for specific tool names (for skill-based tool filtering)."""
+    return {n: _TOOL_HANDLERS[n] for n in tool_names if n in _TOOL_HANDLERS}
+
+
 # ---------------------------------------------------------------------------
 # Tool schema definitions (Anthropic format)
 # ---------------------------------------------------------------------------

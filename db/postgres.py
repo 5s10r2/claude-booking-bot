@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import Optional
 
@@ -73,7 +74,7 @@ async def insert_message(
             now,
             platform_type,
             is_template,
-            pg_ids,
+            json.dumps(pg_ids) if isinstance(pg_ids, list) else pg_ids,
         )
         return row["id"] if row else None
     except Exception as e:
