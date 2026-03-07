@@ -86,7 +86,6 @@ SCHEMAS = {
     "brand_info": {
         "name": "brand_info",
         "description": "Fetch brand and property information for the current platform. Returns rent ranges, amenities, property types, and coverage areas.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -96,7 +95,6 @@ SCHEMAS = {
     "save_preferences": {
         "name": "save_preferences",
         "description": "Save or update user's property search preferences. Call this before searching to store location, budget, property type, and other filters.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -122,7 +120,6 @@ SCHEMAS = {
     "search_properties": {
         "name": "search_properties",
         "description": "Search for properties based on saved preferences. Returns up to 20 properties with name, location, rent, images, and match scores. Show 5 at a time.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -134,7 +131,6 @@ SCHEMAS = {
     "fetch_property_details": {
         "name": "fetch_property_details",
         "description": "Get detailed information about a specific property including amenities, rules, rent, rooms, and images.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -146,7 +142,6 @@ SCHEMAS = {
     "shortlist_property": {
         "name": "shortlist_property",
         "description": "Add a property to the user's shortlist for later reference.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -158,7 +153,6 @@ SCHEMAS = {
     "fetch_property_images": {
         "name": "fetch_property_images",
         "description": "Fetch images for a specific property. Returns image URLs.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -170,7 +164,6 @@ SCHEMAS = {
     "fetch_landmarks": {
         "name": "fetch_landmarks",
         "description": "Get distance from a landmark to a specific property.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -183,7 +176,6 @@ SCHEMAS = {
     "estimate_commute": {
         "name": "estimate_commute",
         "description": "Estimate commute time from a property to a destination (office, college, etc.) via car AND public transit (metro/train). Returns driving time and transit route with walking + ride breakdown.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -197,7 +189,6 @@ SCHEMAS = {
     "fetch_nearby_places": {
         "name": "fetch_nearby_places",
         "description": "Find nearby points of interest (restaurants, metro stations, hospitals, etc.) around a property.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -211,7 +202,6 @@ SCHEMAS = {
     "fetch_room_details": {
         "name": "fetch_room_details",
         "description": "Get available room details for a property including room types, sharing, and availability.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -223,7 +213,6 @@ SCHEMAS = {
     "fetch_properties_by_query": {
         "name": "fetch_properties_by_query",
         "description": "Fetch properties matching a text query/name.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -235,7 +224,6 @@ SCHEMAS = {
     "compare_properties": {
         "name": "compare_properties",
         "description": "Compare 2-3 properties side-by-side. Fetches details and rooms for all properties in parallel and returns a structured comparison with match scores and a recommendation. Use when user says 'compare', 'which is better', 'X vs Y'.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -250,7 +238,6 @@ SCHEMAS = {
     "web_search": {
         "name": "web_search",
         "description": "Search the web for real-time market data, area intelligence, brand info, or general knowledge. Use for: rent ranges, neighborhood safety, connectivity, brand reviews, or any factual question tools can't answer. Cached results are returned instantly. Max 3 searches per conversation.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -274,7 +261,6 @@ SCHEMAS = {
     "save_phone_number": {
         "name": "save_phone_number",
         "description": "Save the user's 10-digit Indian mobile number so it can be used for payment links, visit scheduling, and KYC. Call this when the user provides their phone number and a mobile number is required to proceed.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -289,7 +275,6 @@ SCHEMAS = {
     "save_visit_time": {
         "name": "save_visit_time",
         "description": "Schedule a physical visit to a property. Visits available 9 AM - 5 PM, next 7 days, 30-minute slots.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -304,7 +289,6 @@ SCHEMAS = {
     "save_call_time": {
         "name": "save_call_time",
         "description": "Schedule a phone call or video tour with a property. Available 10 AM - 9 PM, next 7 days.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -319,7 +303,6 @@ SCHEMAS = {
     "create_payment_link": {
         "name": "create_payment_link",
         "description": "Generate a payment link for the token amount to reserve a bed/room.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -331,7 +314,6 @@ SCHEMAS = {
     "verify_payment": {
         "name": "verify_payment",
         "description": "Verify and record a completed payment for a property reservation.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -341,7 +323,6 @@ SCHEMAS = {
     "check_reserve_bed": {
         "name": "check_reserve_bed",
         "description": "Check if a bed is already reserved for the user at a property. Returns success: true if reserved, false if not.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -353,7 +334,6 @@ SCHEMAS = {
     "reserve_bed": {
         "name": "reserve_bed",
         "description": "Reserve a bed/room at a property. ONLY call after KYC verification and payment completion.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -365,7 +345,6 @@ SCHEMAS = {
     "cancel_booking": {
         "name": "cancel_booking",
         "description": "Cancel an existing visit, call, or booking for a property.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -377,7 +356,6 @@ SCHEMAS = {
     "reschedule_booking": {
         "name": "reschedule_booking",
         "description": "Reschedule an existing visit or call to a new date/time.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -392,7 +370,6 @@ SCHEMAS = {
     "fetch_kyc_status": {
         "name": "fetch_kyc_status",
         "description": "Check if the user has completed KYC (Aadhaar verification).",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -402,7 +379,6 @@ SCHEMAS = {
     "initiate_kyc": {
         "name": "initiate_kyc",
         "description": "Start KYC process by submitting user's 12-digit Aadhaar number. An OTP will be sent to their registered phone.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -414,7 +390,6 @@ SCHEMAS = {
     "verify_kyc": {
         "name": "verify_kyc",
         "description": "Complete KYC by verifying the OTP sent to user's phone.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {
@@ -426,7 +401,6 @@ SCHEMAS = {
     "fetch_profile_details": {
         "name": "fetch_profile_details",
         "description": "Fetch the user's saved profile and search preferences.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -436,7 +410,6 @@ SCHEMAS = {
     "get_scheduled_events": {
         "name": "get_scheduled_events",
         "description": "Get all scheduled visits, calls, and bookings for the user.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -446,7 +419,6 @@ SCHEMAS = {
     "get_shortlisted_properties": {
         "name": "get_shortlisted_properties",
         "description": "Get the list of properties the user has shortlisted.",
-        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {},
