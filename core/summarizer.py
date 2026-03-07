@@ -43,6 +43,7 @@ RULES:
 - Use the exact section headers below. Leave a section empty if nothing applies (write "None").
 - Be concise but complete — target ~400-600 tokens total.
 - Write in third person ("The user prefers..." not "You prefer...").
+- CONTEXT CLASH RULE: If the same property appears with different prices or availability at different points in the conversation, preserve ONLY the most recent data. Never carry forward conflicting historical values — always resolve in favour of the latest tool result.
 
 OUTPUT FORMAT (use these exact headers):
 
@@ -128,6 +129,30 @@ def _has_existing_summary(messages: list[dict]) -> bool:
     return SUMMARY_TAG_OPEN in first_content
 
 
+def _extract_existing_summary(messages: list[dict]) -> tuple[str, list[dict]]:
+    """Extract prior summary text and return (summary_text, remaining_messages).
+
+    If a prior summary exists in the first message, returns the text between
+    the summary tags and the messages AFTER the summary pair (skipping the
+    [summary_user, summary_assistant] pair to avoid re-summarizing the same data).
+
+    Returns ("", messages) if no prior summary found.
+    """
+    if not _has_existing_summary(messages):
+        return "", messages
+
+    first_content = str(messages[0].get("content", ""))
+    start = first_content.find(SUMMARY_TAG_OPEN) + len(SUMMARY_TAG_OPEN)
+    end = first_content.find(SUMMARY_TAG_CLOSE)
+    if end == -1:
+        return "", messages
+
+    summary_text = first_content[start:end].strip()
+    # Skip the summary user+assistant pair — only new messages need summarizing
+    remaining = messages[2:] if len(messages) > 2 else []
+    return summary_text, remaining
+
+
 # ---------------------------------------------------------------------------
 # Core summarization
 # ---------------------------------------------------------------------------
@@ -154,36 +179,45 @@ async def maybe_summarize(messages: list[dict], user_id: str) -> list[dict]:
         older = messages[:split_point]
         recent = messages[split_point:]
 
-        # If there's an existing summary, include it as context for re-summarization
-        existing_summary_note = ""
-        if _has_existing_summary(older):
-            existing_summary_note = (
-                "\n\nNOTE: The conversation already contains a previous summary at the start. "
-                "Incorporate that summary's information into your new summary — do not lose any "
-                "tracked properties, preferences, or decisions from the previous summary.\n"
-            )
+        # Hierarchical summarization: extract prior summary + only new messages
+        prior_summary, messages_to_summarize = _extract_existing_summary(older)
 
-        # Format transcript
-        transcript = _format_messages_for_summary(older)
+        # Format only the new messages (prior summary handled separately)
+        transcript = _format_messages_for_summary(messages_to_summarize)
+
+        # Build the summarizer prompt content
+        if prior_summary:
+            # Hierarchical path: prior summary as structured input + new messages
+            prompt_content = (
+                f"{SUMMARIZER_PROMPT}\n\n"
+                f"--- PRIOR SUMMARY (incorporate all tracked properties, preferences, decisions) ---\n\n"
+                f"{prior_summary}\n\n"
+                f"--- NEW MESSAGES TO INTEGRATE ---\n\n"
+                f"{transcript}\n\n"
+                f"--- END ---\n\n"
+                f"Produce a single updated structured summary merging both sources. "
+                f"Resolve any conflicts in favour of the newest data."
+            )
+            logger.debug(
+                "hierarchical summarization: prior summary + %d new messages",
+                len(messages_to_summarize),
+            )
+        else:
+            # First summarization — no prior summary to merge
+            prompt_content = (
+                f"{SUMMARIZER_PROMPT}\n\n"
+                f"--- CONVERSATION TO SUMMARIZE ---\n\n"
+                f"{transcript}\n\n"
+                f"--- END OF CONVERSATION ---\n\n"
+                f"Produce the structured summary now."
+            )
 
         # Call Haiku for summarization
         client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
         response = await client.messages.create(
             model=settings.HAIKU_MODEL,
             max_tokens=800,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"{SUMMARIZER_PROMPT}"
-                        f"{existing_summary_note}\n\n"
-                        f"--- CONVERSATION TO SUMMARIZE ---\n\n"
-                        f"{transcript}\n\n"
-                        f"--- END OF CONVERSATION ---\n\n"
-                        f"Produce the structured summary now."
-                    ),
-                }
-            ],
+            messages=[{"role": "user", "content": prompt_content}],
         )
 
         summary_text = response.content[0].text.strip()

@@ -6,6 +6,15 @@ description: "Selling techniques: objection handling, scarcity, value framing, p
 ---
 
 <instructions>
+FACTUAL GUARDRAIL:
+Scarcity and urgency claims MUST be grounded in real data — never fabricated. This prevents false information from entering conversation history.
+- "Only [N] beds left" → ONLY after fetch_room_details confirms beds_available ≤ 3. Never state a number without data.
+- "Price going up" / "limited time deal" → NEVER use. These are unverifiable and constitute false claims.
+- "Beds filling up in this one" (objection handling) → Acceptable as general market framing if vague; NEVER attach a specific number without tool data.
+- Area rent context ("PGs here average ₹12k-18k") → Your general knowledge is OK for market ranges.
+- Property-specific data (rent, amenities, availability) → MUST come from tools only. Never invent or estimate.
+Violation: invented scarcity written into conversation history persists in summaries as false fact — harming future responses.
+
 PROACTIVE RECOMMENDATIONS:
 After showing search results or property details:
 - High match score (80%+) + rent below user's budget → "This is a great value pick — high match and easy on the pocket!"
