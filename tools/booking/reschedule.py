@@ -21,10 +21,16 @@ async def reschedule_booking(
     if not property_id:
         return "Property ID not available."
 
+    if not any([visit_date, visit_time, visit_type]):
+        return "Please provide at least one field to update (date, time, or visit type)."
+
     update_data = {"user_id": user_id, "property_id": property_id}
 
     if visit_date:
-        update_data["visit_date"] = transcribe_date(visit_date)
+        parsed_date = transcribe_date(visit_date)
+        if not parsed_date:
+            return "I couldn't understand that date. Please say something like 'tomorrow', '15 March', or '25/03/2026'."
+        update_data["visit_date"] = parsed_date
     if visit_time:
         update_data["visit_time"] = visit_time
     if visit_type:

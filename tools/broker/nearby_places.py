@@ -1,4 +1,4 @@
-from db.redis_store import get_property_info_map
+from utils.properties import find_property
 from utils.retry import http_get
 
 
@@ -9,13 +9,7 @@ async def fetch_nearby_places(
     amenity: str = "",
     **kwargs,
 ) -> str:
-    info_map = get_property_info_map(user_id)
-    prop = None
-    for p in info_map:
-        if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-            prop = p
-            break
-
+    prop = find_property(user_id, property_name)
     if not prop:
         return f"Property '{property_name}' not found."
 

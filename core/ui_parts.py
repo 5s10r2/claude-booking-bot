@@ -117,8 +117,9 @@ def _extract_listed_properties(text: str) -> list[dict]:
 
 def _extract_single_name(text: str) -> str | None:
     """Extract a single property name from detail/commute/shortlist responses."""
-    # 'Property Name' in single quotes
-    m = re.search(r"'([^'\n]{3,50})'", text)
+    # 'Property Name' in single quotes — require uppercase first char to avoid
+    # matching apostrophes in contractions ("isn't loading yet, but here's" → false match)
+    m = re.search(r"'([A-Z][^'\n]{2,49})'", text)
     if m:
         return m.group(1).strip()
     # **Property Name** — first bold match (skip numbered ones)
@@ -715,7 +716,9 @@ def _generate_confirmation_card(text: str, ctx: dict, user_id: str, locale: str)
     time_str = _extract_time(text)
 
     # ── Visit confirmation ──
-    if "visit" in lower or "schedule" in lower:
+    # Require a date — CTAs like "Should I book a visit?" don't have a date,
+    # so they won't trigger this card. Only actual scheduled-visit proposals do.
+    if ("visit" in lower or "schedule" in lower) and date_str:
         details = []
         if prop_name:
             details.append({"icon": "home", "text": prop_name})

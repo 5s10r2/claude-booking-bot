@@ -7,10 +7,13 @@ that handles both DD/MM/YYYY and common natural language date strings.
 No external LLM call needed — Claude does the heavy lifting.
 """
 
+import logging
 import re
 from datetime import datetime, timedelta
 
 import pytz
+
+logger = logging.getLogger("utils.date")
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -121,8 +124,9 @@ def transcribe_date(raw_date: str) -> str:
         day = int(ordinal_match.group(1))
         return datetime(now.year, now.month, day).strftime("%d/%m/%Y")
 
-    # If nothing matched, return as-is (Claude may have passed DD/MM/YYYY already)
-    return raw_date.strip()
+    # If nothing matched, return "" to signal a parse failure to callers
+    logger.warning("Could not parse date: %r — not a recognised format", raw_date)
+    return ""
 
 
 def check_if_date_exceeds(date_str: str, days: int) -> bool:

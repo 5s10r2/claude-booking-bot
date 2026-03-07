@@ -2,6 +2,7 @@ import httpx
 
 from config import settings
 from db.redis_store import get_whitelabel_pg_ids
+from utils.api import RentokAPIError, check_rentok_response
 
 
 async def fetch_properties_by_query(user_id: str, query: str, **kwargs) -> str:
@@ -17,6 +18,11 @@ async def fetch_properties_by_query(user_id: str, query: str, **kwargs) -> str:
             data = resp.json()
     except Exception as e:
         return f"Error fetching properties: {str(e)}"
+
+    try:
+        check_rentok_response(data, "fetch-all-properties")
+    except RentokAPIError as e:
+        return f"Error fetching properties: {e}"
 
     properties = data.get("properties", data.get("data", []))
     if not properties:

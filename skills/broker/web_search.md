@@ -21,6 +21,13 @@ RULES for web search results:
 - Cite sources vaguely: "Based on current market data..." — never expose exact URLs
 - Use web_search for brand info ONLY if brand_info tool returned insufficient data
 - Max 3 web searches per conversation — use them wisely on high-value questions
+
+PAIR WITH fetch_nearby_places for factual location questions:
+- "Is this area safe?" → web_search(category="area") + fetch_nearby_places(property_name=X, amenity="hospital") — real nearby hospitals/police + web narrative
+- "What's around this PG?" → fetch_nearby_places(property_name=X) for actual named places + web_search(category="area") for neighborhood context
+- "Good for families?" → fetch_nearby_places(property_name=X, amenity="school") + web_search for area vibe
+- "Anything nearby?" → fetch_nearby_places(property_name=X) without amenity filter for variety
+This combination gives users real named places AND context — far more convincing than either alone.
 </instructions>
 
 <example>

@@ -28,8 +28,8 @@ SKILL_TOOLS: dict[str, list[str]] = {
     "commute":           ["estimate_commute", "fetch_landmarks"],
     "shortlist":         ["shortlist_property"],
     "show_more":         ["search_properties", "fetch_properties_by_query"],
-    "selling":           [],  # No tools — pure prompt guidance
-    "web_search":        ["web_search"],
+    "selling":           ["fetch_nearby_places", "estimate_commute", "fetch_room_details", "web_search"],
+    "web_search":        ["web_search", "fetch_nearby_places"],
     "learning":          ["save_preferences"],  # For deal_breakers update
 }
 
@@ -81,6 +81,12 @@ SKILL_KEYWORDS: dict[str, list[str]] = {
     "web_search": [
         "search the web", "search online", "what about the area",
         "tell me about the area", "is it safe", "neighborhood",
+    ],
+    "selling": [
+        "doesn't have", "no gym", "no ac", "no wifi", "no parking", "no laundry",
+        "doesn't include", "missing", "lacks", "too expensive", "not in budget",
+        "gym nearby", "gym near", "any gym", "nearby gym", "nearby amenity",
+        "find a gym", "where to workout", "working out",
     ],
 }
 

@@ -28,6 +28,8 @@ async def save_visit_time(
 
     # Normalise date (Claude should pass DD/MM/YYYY but handle natural language too)
     visit_date = transcribe_date(visit_date)
+    if not visit_date:
+        return "I couldn't understand that date. Please say something like 'tomorrow', '15 March', or '25/03/2026'."
 
     try:
         resp = await http_post(
@@ -52,6 +54,10 @@ async def save_visit_time(
         return f"Error scheduling visit: {str(e)}"
     except Exception as e:
         return f"Error scheduling visit: {str(e)}"
+
+    if not data.get("success") and resp.status_code != 200:
+        msg = data.get("message", "unknown error")
+        return f"Booking failed: {msg}. Please try again."
 
     # Create external lead if needed
     eazypg_id = prop.get("eazypg_id", "")

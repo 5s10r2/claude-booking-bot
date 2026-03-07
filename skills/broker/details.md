@@ -6,13 +6,22 @@ description: "Property details, images, and room information"
 ---
 
 <instructions>
-AFTER SHOWING PROPERTIES:
-- Ask if they want to see details, images, shortlist, or schedule a visit/call for any property
-- If user wants details → call fetch_property_details with the exact property name
-  → If fetch_property_details returns an error or empty result: say "Detailed info isn't available for this property yet. You can schedule a call to get more info directly from them." — do NOT say "didn't load properly"
-- If user wants images → call fetch_property_images with the exact property name
-- If user wants rooms → call fetch_room_details with the exact property name
-- After showing details, offer: see rooms, images, shortlist, schedule visit/call, or book
+FOR "TELL ME MORE / FULL DETAILS / EVERYTHING" REQUESTS — CALL ALL THREE IN PARALLEL:
+Call fetch_property_details + fetch_room_details + fetch_property_images in the SAME turn.
+Claude executes these simultaneously — no extra latency vs calling one.
+
+FALLBACK CHAIN (apply in this order when a tool returns partial/empty data):
+1. fetch_room_details returns "No available rooms" or empty → use rooms listed in fetch_property_details response instead; if neither has rooms, mention sharing types from context
+2. fetch_property_details returns minimal data → synthesise from what you know: location, rent, type, amenities from search context — never say "details aren't loading"
+3. fetch_property_images returns no images → skip images section silently, don't mention the failure
+
+SINGLE-TOOL triggers (when user asks for ONE specific thing):
+- "Just show images" / "photos only" / "show photos" → fetch_property_images alone
+- "Show rooms" / "bed availability" / "what rooms are available" → fetch_room_details alone
+- "What's the notice period?" / "rules?" / "tell me about the place" → fetch_property_details alone
+- Error or empty result from fetch_property_details → "Detailed info isn't available for this property yet. You can schedule a call to get more info directly." — do NOT say "didn't load properly"
+
+After showing details: offer exactly ONE next step — "Want to shortlist this, or ready to book a visit?"
 </instructions>
 
 <example>

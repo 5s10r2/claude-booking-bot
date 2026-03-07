@@ -1,3 +1,16 @@
+# ⚠️  DEAD CODE — NOT REGISTERED IN TOOLS REGISTRY
+# This tool is NOT wired into any agent and will never be called by Claude.
+# DO NOT register without first resolving the security issue below.
+#
+# SECURITY: load_vectorstore_from_redis() uses allow_dangerous_deserialization=True
+# which deserializes arbitrary Python pickle data from Redis. If Redis is compromised
+# or the faiss:*:pkl keys are poisoned, this leads to remote code execution.
+# Safe alternatives: store embeddings as numpy arrays (no pickle), use pgvector,
+# or re-embed at query time from sanitised raw text stored in Redis.
+#
+# To reactivate safely:
+# 1. Replace pickle-based FAISS storage with a safe embedding store.
+# 2. Register the tool in tools/registry.py for the appropriate agent.
 from db.redis_store import load_vectorstore_from_redis
 
 

@@ -28,7 +28,7 @@ PROFILE_PHRASES = [
     "my visit", "my visits", "my booking", "my bookings",
     "my schedule", "my event", "my events",
     "my preference", "my preferences", "my profile",
-    "shortlisted propert", "saved propert",
+    "shortlisted properties", "saved properties",
     "booking status", "visit status", "scheduled event",
 ]
 

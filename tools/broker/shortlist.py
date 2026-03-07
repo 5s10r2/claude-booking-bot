@@ -1,29 +1,21 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map, get_whitelabel_pg_ids, track_funnel, get_user_phone, record_property_shortlisted, schedule_followup
+from db.redis_store import get_whitelabel_pg_ids, track_funnel, get_user_phone, record_property_shortlisted, schedule_followup
 from core.log import get_logger
+from utils.properties import find_property
 
 logger = get_logger("tools.shortlist")
 
 
 async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
-    info_map = get_property_info_map(user_id)
-    prop = None
-    for p in info_map:
-        if p.get("property_name", "").strip().lower() == property_name.strip().lower():
-            prop = p
-            break
-    if not prop:
-        for p in info_map:
-            if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-                prop = p
-                break
-
+    prop = find_property(user_id, property_name)
     if not prop:
         return f"Property '{property_name}' not found in search results."
 
     prop_id = prop.get("prop_id") or prop.get("pg_id")
+    if not prop_id:
+        return f"Cannot shortlist — property ID missing for '{property_name}'. Please search again."
     # property_contact = the property's own phone (from listing data), not the user's phone
     property_contact = prop.get("phone_number", "")
     # user_id field: use real phone if available, else full user_id as opaque key

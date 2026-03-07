@@ -14,7 +14,7 @@ async def get_scheduled_events(user_id: str, **kwargs) -> str:
     except Exception as e:
         return f"Error fetching scheduled events: {str(e)}"
 
-    events = data.get("data", [])
+    events = data.get("data") or []
     if not events:
         return "No scheduled events found. Would you like to schedule a property visit or call?"
 

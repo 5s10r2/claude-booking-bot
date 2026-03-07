@@ -12,6 +12,7 @@ from db.redis_store import (
     get_preferences,
     get_property_info_map,
     set_property_info_map,
+    set_last_search_results,
     save_property_template,
     get_whitelabel_pg_ids,
     save_preferences as redis_save_preferences,
@@ -426,6 +427,18 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         )
 
     set_property_info_map(user_id, existing_map)
+
+    # Cache summary of top-10 results for cross-session context (24h TTL)
+    set_last_search_results(user_id, [
+        {
+            "property_name": p.get("property_name", ""),
+            "pg_id": p.get("pg_id", ""),
+            "property_rent": p.get("property_rent", ""),
+            "property_location": p.get("property_location", ""),
+        }
+        for p in existing_map[:10]
+    ])
+
     save_property_template(user_id, property_template[:5])
     track_funnel(user_id, "search")
 

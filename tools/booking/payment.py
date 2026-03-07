@@ -19,6 +19,14 @@ logger = get_logger("tools.payment")
 
 
 async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str:
+    # Phone validation first — required before any property lookup or API call
+    phone = get_user_phone(user_id)
+    if not phone:
+        return (
+            "I need your mobile number to generate a payment link. "
+            "Please share your 10-digit Indian mobile number and I'll proceed right away!"
+        )
+
     prop = _find_property(user_id, property_name)
     if not prop:
         return f"Property '{property_name}' not found."
@@ -27,14 +35,6 @@ async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str
     pg_id = prop.get("pg_id", "")
     pg_number = prop.get("pg_number", "")
     amount = prop.get("property_min_token_amount", 0) or 1000
-
-    # Resolve phone — required by Rentok tenant system
-    phone = get_user_phone(user_id)
-    if not phone:
-        return (
-            "I need your mobile number to generate a payment link. "
-            "Please share your 10-digit Indian mobile number and I'll proceed right away!"
-        )
 
     # Fetch tenant UUID — create lead if tenant doesn't exist yet
     tenant_uuid = ""
@@ -114,11 +114,12 @@ async def verify_payment(user_id: str, **kwargs) -> str:
     link_subs = payment_info.get("short_link", "")
 
     # Record payment in backend
+    safe_user_id = user_id[:12] if len(user_id) >= 12 else user_id
     try:
         await http_post(
             f"{settings.RENTOK_API_BASE_URL}/bookingBot/addPayment",
             json={
-                "user_id": user_id[:12],
+                "user_id": safe_user_id,
                 "pg_id": pg_id,
                 "pg_number": pg_number,
                 "amount": amount,
@@ -127,6 +128,7 @@ async def verify_payment(user_id: str, **kwargs) -> str:
         )
     except Exception as e:
         logger.warning("addPayment API failed for user=%s pg_id=%s: %s", user_id, pg_id, e)
+        return "Payment recording failed — please contact support to confirm your payment was received."
 
     # Update lead status to Token
     info_map = get_property_info_map(user_id)

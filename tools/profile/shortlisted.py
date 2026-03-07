@@ -7,14 +7,15 @@ async def get_shortlisted_properties(user_id: str, **kwargs) -> str:
         return "No shortlisted properties yet. Search for properties and shortlist the ones you like!"
 
     info_map = get_property_info_map(user_id)
-    names = []
-    for prop_id in shortlisted_ids:
-        for info in info_map:
-            if info.get("property_id") == prop_id:
-                names.append(info.get("property_name", "Unknown"))
-                break
-        else:
-            names.append(f"Property ID: {prop_id}")
+    # Build a lookup dict covering all possible ID keys — O(n) instead of O(n²)
+    id_to_name: dict[str, str] = {}
+    for info in info_map:
+        name = info.get("property_name", "Unknown")
+        for key in ("property_id", "prop_id", "pg_id"):
+            pid = info.get(key, "")
+            if pid:
+                id_to_name[pid] = name
+    names = [id_to_name.get(pid, f"Property ID: {pid}") for pid in shortlisted_ids]
 
     lines = ["Your shortlisted properties:"]
     for i, name in enumerate(names, 1):

@@ -1,4 +1,8 @@
+import logging
+
 from db.redis_store import save_preferences as redis_save_preferences, get_preferences, add_deal_breaker
+
+logger = logging.getLogger("tools.broker.preferences")
 
 
 def save_preferences(
@@ -20,7 +24,11 @@ def save_preferences(
     commute_from: str = "",
     **kwargs,
 ) -> str:
-    existing = get_preferences(user_id)
+    try:
+        existing = get_preferences(user_id)
+    except Exception as e:
+        logger.warning("Redis error loading preferences for user=%s: %s", user_id, e)
+        existing = {}
 
     if location:
         existing["location"] = location
@@ -58,5 +66,9 @@ def save_preferences(
             if db:
                 add_deal_breaker(user_id, db)
 
-    redis_save_preferences(user_id, existing)
+    try:
+        redis_save_preferences(user_id, existing)
+    except Exception as e:
+        logger.warning("Redis error saving preferences for user=%s: %s", user_id, e)
+        return "Preferences noted but could not be saved due to a temporary error. Please try again."
     return f"Preferences saved: {existing}"

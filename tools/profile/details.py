@@ -2,7 +2,10 @@ from db.redis_store import get_preferences
 
 
 async def fetch_profile_details(user_id: str, **kwargs) -> str:
-    prefs = get_preferences(user_id)
+    try:
+        prefs = get_preferences(user_id)
+    except Exception:
+        return "Unable to load your profile right now. Please try again in a moment."
 
     if not prefs:
         return (

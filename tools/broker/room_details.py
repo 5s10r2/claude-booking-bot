@@ -1,17 +1,11 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map
+from utils.properties import find_property
 
 
 async def fetch_room_details(user_id: str, property_name: str, **kwargs) -> str:
-    info_map = get_property_info_map(user_id)
-    prop = None
-    for p in info_map:
-        if property_name.strip().lower() in p.get("property_name", "").strip().lower():
-            prop = p
-            break
-
+    prop = find_property(user_id, property_name)
     if not prop:
         return f"Property '{property_name}' not found."
 
@@ -32,7 +26,22 @@ async def fetch_room_details(user_id: str, property_name: str, **kwargs) -> str:
 
     rooms = data.get("rooms", data.get("data", []))
     if not rooms:
-        return f"No available rooms found for '{property_name}'."
+        sharing_types = prop.get("sharing_types", [])
+        amenities = prop.get("amenities", "")
+        rent = prop.get("property_rent", "")
+        if sharing_types or amenities:
+            name = prop.get("property_name", property_name)
+            result = f"Live bed availability for '{name}' isn't showing right now. From our listings:\n"
+            if sharing_types:
+                sharing_str = ", ".join(sharing_types) if isinstance(sharing_types, list) else str(sharing_types)
+                result += f"- Sharing options: {sharing_str}\n"
+            if amenities:
+                result += f"- Amenities: {amenities}\n"
+            if rent:
+                result += f"- Rent starts from: ₹{rent}/mo\n"
+            result += "For confirmed availability, schedule a visit or call the property directly."
+            return result
+        return f"No room data available for '{property_name}'. Schedule a visit to check in person."
 
     result = f"Available rooms at '{prop.get('property_name', property_name)}':\n"
     for room in rooms:

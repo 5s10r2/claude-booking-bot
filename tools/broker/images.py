@@ -13,6 +13,8 @@ async def fetch_property_images(user_id: str, property_name: str, **kwargs) -> s
 
     pg_id = prop.get("pg_id", "")
     pg_number = prop.get("pg_number", "")
+    if not pg_id or not pg_number:
+        return f"Property IDs not available for '{property_name}'. Please search for the property again."
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:

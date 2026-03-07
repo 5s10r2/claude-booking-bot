@@ -130,6 +130,21 @@ def get_property_info_map(user_id: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Last search results (cross-session context, 24h TTL)
+# ---------------------------------------------------------------------------
+
+LAST_SEARCH_TTL = 86400  # 24 hours
+
+
+def set_last_search_results(user_id: str, results: list[dict]) -> None:
+    _json_set(f"{user_id}:last_search", results, ex=LAST_SEARCH_TTL)
+
+
+def get_last_search_results(user_id: str) -> list[dict]:
+    return _json_get(f"{user_id}:last_search", default=[])
+
+
+# ---------------------------------------------------------------------------
 # Shortlisted properties
 # ---------------------------------------------------------------------------
 
@@ -414,6 +429,13 @@ def store_vectorstore_in_redis(file_hash: str, vectorstore) -> None:
 
 
 def load_vectorstore_from_redis(file_hash: str):
+    # ⚠️  SECURITY WARNING — allow_dangerous_deserialization=True
+    # The index.pkl file is deserialized from Redis using Python's pickle protocol.
+    # If an attacker can write to Redis (or to the faiss:*:pkl key), they can achieve
+    # remote code execution on the server.  This function is currently unreachable
+    # because query_knowledge_base() is NOT registered in tools/registry.py.
+    # Before re-enabling, replace the pickle-based FAISS backend with a safe
+    # embedding store (e.g. pgvector, numpy arrays, or re-embedding from raw text).
     from langchain_openai import OpenAIEmbeddings
     from langchain_community.vectorstores import FAISS
 
@@ -429,7 +451,7 @@ def load_vectorstore_from_redis(file_hash: str):
     vectorstore = FAISS.load_local(
         f"/tmp/faiss_{file_hash}",
         OpenAIEmbeddings(),
-        allow_dangerous_deserialization=True,
+        allow_dangerous_deserialization=True,  # UNSAFE — see warning above
     )
     import shutil
     shutil.rmtree(f"/tmp/faiss_{file_hash}", ignore_errors=True)
@@ -870,6 +892,13 @@ def build_returning_user_context(user_id: str) -> str:
 
     if loc and budget:
         parts.append("→ Skip qualifying questions — go straight to search or pick up where they left off")
+
+    # Inject last search results for cross-session context
+    last_search = get_last_search_results(user_id)
+    if last_search:
+        names = ", ".join(p["property_name"] for p in last_search if p.get("property_name"))
+        if names:
+            parts.append(f"Last search results (cached in property_info_map): {names}")
 
     return "\n".join(parts)
 

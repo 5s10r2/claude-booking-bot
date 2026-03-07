@@ -49,6 +49,6 @@ async def reserve_bed(user_id: str, property_name: str, **kwargs) -> str:
     except Exception as e:
         return f"Error reserving bed: {str(e)}"
 
-    if data.get("success") or resp.status_code == 200:
+    if data.get("success"):
         return f"Bed reserved successfully at '{prop.get('property_name', property_name)}'!"
     return f"Failed to reserve bed: {data.get('message', 'Unknown error')}"

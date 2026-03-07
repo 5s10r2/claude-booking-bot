@@ -72,7 +72,9 @@ async def verify_kyc(user_id: str, otp: str, **kwargs) -> str:
     if not otp_clean:
         return "Please provide the OTP."
 
-    phone = get_user_phone(user_id) or user_id
+    phone = get_user_phone(user_id)
+    if not phone:
+        return "Phone number required for KYC verification. Please save your mobile number first using the save_phone_number tool."
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -97,6 +99,7 @@ async def verify_kyc(user_id: str, otp: str, **kwargs) -> str:
             )
     except Exception as e:
         logger.warning("KYC update failed for user=%s: %s", user_id, e)
+        return f"OTP verified but KYC status update failed — please contact support. Error: {str(e)}"
 
     # Store Aadhaar name and gender in Redis
     name = kyc_data.get("name", "")

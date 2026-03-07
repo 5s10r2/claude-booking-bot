@@ -88,6 +88,7 @@ SCHEMAS = {
         "description": "Fetch brand and property information for the current platform. Returns rent ranges, amenities, property types, and coverage areas.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {},
             "required": [],
         },
@@ -97,6 +98,7 @@ SCHEMAS = {
         "description": "Save or update user's property search preferences. Call this before searching to store location, budget, property type, and other filters.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "location": {"type": "string", "description": "Area/locality AND city, e.g. 'Koramangala, Bangalore'"},
                 "city": {"type": "string", "description": "City name, e.g. 'Bangalore'"},
@@ -122,6 +124,7 @@ SCHEMAS = {
         "description": "Search for properties based on saved preferences. Returns up to 20 properties with name, location, rent, images, and match scores. Show 5 at a time.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "radius_flag": {"type": "boolean", "description": "Set true to expand search radius by 5km"},
             },
@@ -130,9 +133,10 @@ SCHEMAS = {
     },
     "fetch_property_details": {
         "name": "fetch_property_details",
-        "description": "Get detailed information about a specific property including amenities, rules, rent, rooms, and images.",
+        "description": "Get comprehensive details about a specific property: amenities (common/food/services), notice period, agreement terms, check-in/out times, GST, property rules, reviews, FAQs, AND a list of available room types with rent. Preferred first call for detail requests. Has a Redis cache fallback if the API returns sparse data. Different endpoint from fetch_room_details.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact name of the property as shown in search results"},
             },
@@ -144,6 +148,7 @@ SCHEMAS = {
         "description": "Add a property to the user's shortlist for later reference.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact name of the property to shortlist"},
             },
@@ -152,9 +157,10 @@ SCHEMAS = {
     },
     "fetch_property_images": {
         "name": "fetch_property_images",
-        "description": "Fetch images for a specific property. Returns image URLs.",
+        "description": "Fetch photo gallery URLs for a specific property. Call in parallel with fetch_property_details and fetch_room_details for comprehensive detail responses — no extra latency.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
             },
@@ -166,6 +172,7 @@ SCHEMAS = {
         "description": "Get distance from a landmark to a specific property.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "landmark_name": {"type": "string", "description": "Name of the landmark or place"},
                 "property_name": {"type": "string", "description": "Exact property name"},
@@ -178,6 +185,7 @@ SCHEMAS = {
         "description": "Estimate commute time from a property to a destination (office, college, etc.) via car AND public transit (metro/train). Returns driving time and transit route with walking + ride breakdown.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
                 "destination": {"type": "string", "description": "Destination name or address (e.g. office name, college, area)"},
@@ -191,6 +199,7 @@ SCHEMAS = {
         "description": "Find nearby points of interest (restaurants, metro stations, hospitals, etc.) around a property.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
                 "radius": {"type": "integer", "description": "Search radius in meters (default 5000)"},
@@ -201,9 +210,10 @@ SCHEMAS = {
     },
     "fetch_room_details": {
         "name": "fetch_room_details",
-        "description": "Get available room details for a property including room types, sharing, and availability.",
+        "description": "Get REAL-TIME bed availability per room (beds_available count, sharing type, per-room amenities). Uses a different API endpoint from fetch_property_details. Call alongside fetch_property_details for a complete room picture. Falls back to search cache data (sharing types, amenities, rent) if live availability is empty.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
             },
@@ -215,6 +225,7 @@ SCHEMAS = {
         "description": "Fetch properties matching a text query/name.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "query": {"type": "string", "description": "Property name or search query"},
             },
@@ -226,6 +237,7 @@ SCHEMAS = {
         "description": "Compare 2-3 properties side-by-side. Fetches details and rooms for all properties in parallel and returns a structured comparison with match scores and a recommendation. Use when user says 'compare', 'which is better', 'X vs Y'.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_names": {
                     "type": "string",
@@ -240,6 +252,7 @@ SCHEMAS = {
         "description": "Search the web for real-time market data, area intelligence, brand info, or general knowledge. Use for: rent ranges, neighborhood safety, connectivity, brand reviews, or any factual question tools can't answer. Cached results are returned instantly. Max 3 searches per conversation.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "query": {
                     "type": "string",
@@ -263,6 +276,7 @@ SCHEMAS = {
         "description": "Save the user's 10-digit Indian mobile number so it can be used for payment links, visit scheduling, and KYC. Call this when the user provides their phone number and a mobile number is required to proceed.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "phone_number": {
                     "type": "string",
@@ -277,6 +291,7 @@ SCHEMAS = {
         "description": "Schedule a physical visit to a property. Visits available 9 AM - 5 PM, next 7 days, 30-minute slots.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
                 "visit_date": {"type": "string", "description": "Visit date as stated by user"},
@@ -291,13 +306,14 @@ SCHEMAS = {
         "description": "Schedule a phone call or video tour with a property. Available 10 AM - 9 PM, next 7 days.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
                 "visit_date": {"type": "string", "description": "Date as stated by user"},
                 "visit_time": {"type": "string", "description": "Time as stated by user"},
                 "visit_type": {"type": "string", "description": "'Phone Call' or 'Video Tour'"},
             },
-            "required": ["property_name", "visit_date", "visit_time", "visit_type"],
+            "required": ["property_name", "visit_date", "visit_time"],
         },
     },
     "create_payment_link": {
@@ -305,6 +321,7 @@ SCHEMAS = {
         "description": "Generate a payment link for the token amount to reserve a bed/room.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
             },
@@ -316,6 +333,7 @@ SCHEMAS = {
         "description": "Verify and record a completed payment for a property reservation.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {},
             "required": [],
         },
@@ -325,6 +343,7 @@ SCHEMAS = {
         "description": "Check if a bed is already reserved for the user at a property. Returns success: true if reserved, false if not.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
             },
@@ -336,6 +355,7 @@ SCHEMAS = {
         "description": "Reserve a bed/room at a property. ONLY call after KYC verification and payment completion.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
             },
@@ -347,6 +367,7 @@ SCHEMAS = {
         "description": "Cancel an existing visit, call, or booking for a property.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
             },
@@ -358,6 +379,7 @@ SCHEMAS = {
         "description": "Reschedule an existing visit or call to a new date/time.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "property_name": {"type": "string", "description": "Exact property name"},
                 "visit_date": {"type": "string", "description": "New date"},
@@ -372,6 +394,7 @@ SCHEMAS = {
         "description": "Check if the user has completed KYC (Aadhaar verification).",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {},
             "required": [],
         },
@@ -381,6 +404,7 @@ SCHEMAS = {
         "description": "Start KYC process by submitting user's 12-digit Aadhaar number. An OTP will be sent to their registered phone.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "aadhar_number": {"type": "string", "description": "12-digit Aadhaar number"},
             },
@@ -392,6 +416,7 @@ SCHEMAS = {
         "description": "Complete KYC by verifying the OTP sent to user's phone.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "otp": {"type": "string", "description": "OTP received by the user"},
             },
@@ -403,6 +428,7 @@ SCHEMAS = {
         "description": "Fetch the user's saved profile and search preferences.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {},
             "required": [],
         },
@@ -412,6 +438,7 @@ SCHEMAS = {
         "description": "Get all scheduled visits, calls, and bookings for the user.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {},
             "required": [],
         },
@@ -421,6 +448,7 @@ SCHEMAS = {
         "description": "Get the list of properties the user has shortlisted.",
         "input_schema": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {},
             "required": [],
         },
