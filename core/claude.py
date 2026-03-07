@@ -233,20 +233,22 @@ class AnthropicEngine:
             }
         ]
 
+        # Prefill assistant with "{" — forces model to output JSON, prevents prose responses
+        messages_with_prefill = messages + [{"role": "assistant", "content": "{"}]
         for attempt in range(3):
             try:
                 response = await self.client.messages.create(
                     model=model,
                     max_tokens=MAX_TOKENS_CLASSIFY,
                     system=system,
-                    messages=messages,
+                    messages=messages_with_prefill,
                 )
-                text = self._extract_text(response)
-                if text:
-                    import json
-                    cleaned = self._clean_json(text)
-                    logger.debug("classify raw=%s → cleaned=%s", repr(text[:80]), repr(cleaned))
-                    return json.loads(cleaned)
+                # Prepend the prefill char back — API returns only the continuation
+                text = "{" + self._extract_text(response)
+                import json
+                cleaned = self._clean_json(text)
+                logger.debug("classify raw=%s → cleaned=%s", repr(text[:80]), repr(cleaned))
+                return json.loads(cleaned)
             except Exception as e:
                 logger.warning("classify attempt %d failed: %s", attempt + 1, e)
                 await asyncio.sleep(0.5)

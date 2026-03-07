@@ -202,8 +202,8 @@ async def estimate_commute(
     if not prop:
         return f"Property '{property_name}' not found."
 
-    prop_lat = float(prop.get("property_lat", 0))
-    prop_long = float(prop.get("property_long", 0))
+    prop_lat = float(prop.get("property_lat") or 0)
+    prop_long = float(prop.get("property_long") or 0)
     if not prop_lat or not prop_long:
         return "Property coordinates not available."
 
