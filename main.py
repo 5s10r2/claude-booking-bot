@@ -1295,7 +1295,8 @@ async def admin_backfill_users():
     Returns count of users added.
     """
     import time as _time
-    r = redis_store._r()
+    from db.redis_store import _r
+    r = _r()
     added = 0
     # Scan for all conversation keys
     cursor = 0
