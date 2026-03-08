@@ -272,6 +272,10 @@ async def chat(req: ChatRequest):
 
     response, agent_name, language = await run_pipeline(req.user_id, req.message)
 
+    # Human mode — AI bypassed; admin is responding manually
+    if agent_name == "human":
+        return ChatResponse(response="", agent="human", parts=[], locale=language)
+
     # Persist to Postgres
     pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
     await pg.insert_message(
@@ -366,6 +370,22 @@ async def chat_stream(req: ChatRequest):
         pg_ids = req.account_values.get("pg_ids", [])
         if pg_ids:
             set_whitelabel_pg_ids(req.user_id, pg_ids)
+
+    # Human takeover bypass — save user message and emit empty stream so admin handles it
+    if get_human_mode(req.user_id):
+        conv = get_conversation(req.user_id)
+        conv.append({"role": "user", "content": req.message})
+        save_conversation(req.user_id, conv)
+        language = get_user_language(req.user_id) or "en"
+
+        async def _human_stream():
+            yield f"event: done\ndata: {json.dumps({'agent': 'human', 'full_response': '', 'parts': [], 'locale': language})}\n\n"
+
+        return StreamingResponse(
+            _human_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        )
 
     # Route to the correct agent (fast — Haiku + keyword fallback + skill detection)
     agent_name, messages, language, skills = await _route_agent(req.user_id, req.message)
@@ -551,6 +571,10 @@ async def whatsapp_webhook(request: Request):
         agent_name = "error"
 
     delete_active_request(user_phone)
+
+    # Human mode — pipeline saved the user message; admin is responding manually, skip all outbound sends
+    if agent_name == "human":
+        return JSONResponse({"status": "ok", "agent": "human", "human_mode": True})
 
     # Check if we should skip sending (no_message flag)
     if get_no_message(user_phone) == "1":
