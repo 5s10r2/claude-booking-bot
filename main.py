@@ -6,13 +6,10 @@ Endpoints:
 - POST /webhook/payment    — Payment confirmation callback
 - POST /chat               — Streamlit / API clients
 - POST /chat/stream        — SSE streaming responses
-- POST /knowledge-base     — Upload PDFs/QA pairs to FAISS vectorstore
-- POST /query              — Query knowledge base
 - GET  /health             — Health check
 """
 
 import json
-import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -47,8 +44,6 @@ from db.redis_store import (
     get_no_message,
     set_no_message,
     clear_no_message,
-    store_vectorstore_in_redis,
-    get_file_hash,
     set_last_agent,
     save_feedback,
     get_feedback_counts,
@@ -65,7 +60,7 @@ from db.redis_store import (
     update_user_memory,
     get_user_phone,
 )
-from agents import supervisor, default_agent, broker_agent, booking_agent, profile_agent, room_agent
+from agents import supervisor, default_agent, broker_agent, booking_agent, profile_agent
 from channels.whatsapp import send_text, send_carousel, send_images
 from db.redis_store import get_property_template, get_property_images_id
 
@@ -585,97 +580,6 @@ async def payment_webhook(request: Request):
             await send_text(user_id, notification)
 
     return JSONResponse({"status": "ok"})
-
-
-@app.post("/knowledge-base", dependencies=[Depends(verify_api_key)])
-async def upload_knowledge_base(request: Request):
-    """Upload PDFs or QA pairs to create a FAISS vectorstore."""
-    try:
-        from PyPDF2 import PdfReader
-        from langchain_community.vectorstores import FAISS
-        from langchain_openai import OpenAIEmbeddings
-        from langchain.text_splitter import RecursiveCharacterTextSplitter
-    except ImportError:
-        raise HTTPException(status_code=500, detail="Knowledge base dependencies not installed")
-
-    form = await request.form()
-    files = form.getlist("files")
-    qa_data = form.get("qa_data", "")
-
-    if not files and not qa_data:
-        raise HTTPException(status_code=400, detail="No files or QA data provided")
-
-    texts = []
-    file_datas = []
-
-    # Process PDF files
-    for f in files:
-        content = await f.read()
-        file_datas.append(content)
-        try:
-            import io
-            reader = PdfReader(io.BytesIO(content))
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    texts.append(page_text)
-        except Exception as e:
-            logger.error("Error reading PDF: %s", e)
-
-    # Process QA data
-    if qa_data:
-        try:
-            qa_pairs = json.loads(qa_data)
-            for qa in qa_pairs:
-                q = qa.get("question", "")
-                a = qa.get("answer", "")
-                if q and a:
-                    texts.append(f"Q: {q}\nA: {a}")
-                    file_datas.append(f"{q}{a}".encode())
-        except json.JSONDecodeError:
-            texts.append(qa_data)
-            file_datas.append(qa_data.encode())
-
-    if not texts:
-        raise HTTPException(status_code=400, detail="No extractable text found")
-
-    # Create vectorstore
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_text("\n\n".join(texts))
-
-    embeddings = OpenAIEmbeddings()
-    vectorstore = FAISS.from_texts(chunks, embeddings)
-
-    file_hash = get_file_hash(file_datas)
-    store_vectorstore_in_redis(file_hash, vectorstore)
-
-    return JSONResponse({
-        "status": "ok",
-        "file_hash": file_hash,
-        "chunks": len(chunks),
-    })
-
-
-@app.post("/query", dependencies=[Depends(verify_api_key)])
-async def query_kb(request: Request):
-    """Query the knowledge base."""
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-
-    query = body.get("query", "")
-    file_hash = body.get("file_hash", "")
-    user_id = body.get("user_id", "anonymous")
-
-    if not query or not file_hash:
-        raise HTTPException(status_code=400, detail="query and file_hash are required")
-
-    # Build messages for room agent
-    messages = [{"role": "user", "content": query}]
-    response = await room_agent.run(engine, messages, user_id, file_hash=file_hash)
-
-    return JSONResponse({"response": response})
 
 
 # ---------------------------------------------------------------------------

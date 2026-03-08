@@ -1,6 +1,5 @@
 import json
 import pickle
-import hashlib
 import os
 import re
 from datetime import date
@@ -405,57 +404,6 @@ def get_property_id_for_search(user_id: str) -> list[str]:
 
 def clear_property_id_for_search(user_id: str) -> None:
     _r().delete(f"{user_id}:search_property_ids")
-
-
-# ---------------------------------------------------------------------------
-# FAISS vectorstore (knowledge base)
-# ---------------------------------------------------------------------------
-
-def get_file_hash(file_datas: list[bytes]) -> str:
-    m = hashlib.sha256()
-    for data in file_datas:
-        m.update(data)
-    return m.hexdigest()
-
-
-def store_vectorstore_in_redis(file_hash: str, vectorstore) -> None:
-    vectorstore.save_local(f"/tmp/faiss_{file_hash}")
-    with open(f"/tmp/faiss_{file_hash}/index.faiss", "rb") as f:
-        _r().set(f"faiss:{file_hash}:index", f.read())
-    with open(f"/tmp/faiss_{file_hash}/index.pkl", "rb") as f:
-        _r().set(f"faiss:{file_hash}:pkl", f.read())
-    import shutil
-    shutil.rmtree(f"/tmp/faiss_{file_hash}", ignore_errors=True)
-
-
-def load_vectorstore_from_redis(file_hash: str):
-    # ⚠️  SECURITY WARNING — allow_dangerous_deserialization=True
-    # The index.pkl file is deserialized from Redis using Python's pickle protocol.
-    # If an attacker can write to Redis (or to the faiss:*:pkl key), they can achieve
-    # remote code execution on the server.  This function is currently unreachable
-    # because query_knowledge_base() is NOT registered in tools/registry.py.
-    # Before re-enabling, replace the pickle-based FAISS backend with a safe
-    # embedding store (e.g. pgvector, numpy arrays, or re-embedding from raw text).
-    from langchain_openai import OpenAIEmbeddings
-    from langchain_community.vectorstores import FAISS
-
-    index_data = _r().get(f"faiss:{file_hash}:index")
-    pkl_data = _r().get(f"faiss:{file_hash}:pkl")
-    if not index_data or not pkl_data:
-        return None
-    os.makedirs(f"/tmp/faiss_{file_hash}", exist_ok=True)
-    with open(f"/tmp/faiss_{file_hash}/index.faiss", "wb") as f:
-        f.write(index_data)
-    with open(f"/tmp/faiss_{file_hash}/index.pkl", "wb") as f:
-        f.write(pkl_data)
-    vectorstore = FAISS.load_local(
-        f"/tmp/faiss_{file_hash}",
-        OpenAIEmbeddings(),
-        allow_dangerous_deserialization=True,  # UNSAFE — see warning above
-    )
-    import shutil
-    shutil.rmtree(f"/tmp/faiss_{file_hash}", ignore_errors=True)
-    return vectorstore
 
 
 # ---------------------------------------------------------------------------

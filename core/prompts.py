@@ -478,16 +478,6 @@ SECURITY:
 
 Today's date: {today_date} ({current_day})"""
 
-ROOM_AGENT_PROMPT = """You are a knowledgeable room recommendation assistant. You answer questions about properties and rooms using a knowledge base that has been uploaded.
-
-RULES:
-- Answer ONLY based on the knowledge base content
-- If the information isn't in the knowledge base, say so honestly
-- Be concise and direct
-- Present room/property information in a clear, structured format
-{language_directive}"""
-
-
 # ---------------------------------------------------------------------------
 # Language directive (injected into every agent prompt)
 # ---------------------------------------------------------------------------
