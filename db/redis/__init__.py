@@ -1,29 +1,32 @@
 """
-db/redis_store.py — Backward-compatible re-export shim.
+db/redis/__init__.py — Public API for the Redis package.
 
-All Redis logic now lives in the db/redis/ package (domain-split modules).
-This file exists solely so that existing imports like:
+Re-exports all functions from domain modules so callers can use:
+    from db.redis import get_conversation, save_preferences, ...
 
-    from db.redis_store import get_conversation, save_preferences, ...
-
-continue to work without any changes to callers.
-
-To add new Redis operations: add them to the appropriate db/redis/<domain>.py
-module and add a re-export here.
+Domain modules:
+  _base        — connection pool, _r(), _json_get, _json_set, TTL constants
+  conversation — conversation history, active request, last agent, account values
+  user         — preferences, identity, language, KYC, cross-session memory
+  property     — property cache, search results, images, templates
+  analytics    — feedback, agent/skill usage, funnel, WhatsApp dedup
+  payment      — payment info, follow-up scheduling
+  brand        — multi-tenant brand config
+  admin        — user enumeration, human mode, session cost
 """
 
-# Re-export everything from the new package — zero logic lives here
-from db.redis import (  # noqa: F401
-    # Infrastructure
-    _r,
-    _json_get,
-    _json_set,
+# Infrastructure — exposed for the rare callers that need raw access
+from db.redis._base import _r, _json_get, _json_set  # noqa: F401
+from db.redis._base import (  # noqa: F401
     PROPERTY_INFO_TTL,
     SEARCH_IDS_TTL,
     LANGUAGE_TTL,
     ANALYTICS_TTL,
     LAST_SEARCH_TTL,
-    # Conversation domain
+)
+
+# Conversation domain
+from db.redis.conversation import (  # noqa: F401
     get_conversation,
     save_conversation,
     clear_conversation,
@@ -37,7 +40,10 @@ from db.redis import (  # noqa: F401
     clear_account_values,
     set_whitelabel_pg_ids,
     get_whitelabel_pg_ids,
-    # User domain
+)
+
+# User domain
+from db.redis.user import (  # noqa: F401
     save_preferences,
     get_preferences,
     set_user_name,
@@ -68,7 +74,10 @@ from db.redis import (  # noqa: F401
     add_deal_breaker,
     build_returning_user_context,
     FUNNEL_ORDER,
-    # Property domain
+)
+
+# Property domain
+from db.redis.property import (  # noqa: F401
     set_property_info_map,
     get_property_info_map,
     set_last_search_results,
@@ -86,7 +95,10 @@ from db.redis import (  # noqa: F401
     set_property_id_for_search,
     get_property_id_for_search,
     clear_property_id_for_search,
-    # Analytics domain
+)
+
+# Analytics domain
+from db.redis.analytics import (  # noqa: F401
     save_feedback,
     get_feedback_counts,
     track_agent_usage,
@@ -100,7 +112,10 @@ from db.redis import (  # noqa: F401
     set_response,
     get_response,
     FUNNEL_STAGES,
-    # Payment domain
+)
+
+# Payment domain
+from db.redis.payment import (  # noqa: F401
     set_payment_info,
     get_payment_info,
     clear_payment_info,
@@ -108,13 +123,19 @@ from db.redis import (  # noqa: F401
     get_due_followups,
     complete_followup,
     cancel_followups,
-    # Brand domain
+)
+
+# Brand domain
+from db.redis.brand import (  # noqa: F401
     _brand_hash,
     get_brand_config,
     set_brand_config,
     get_brand_wa_config,
     get_brand_by_token,
-    # Admin domain
+)
+
+# Admin domain
+from db.redis.admin import (  # noqa: F401
     get_active_users,
     get_active_users_count,
     get_human_mode,

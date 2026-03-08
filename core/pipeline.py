@@ -1,0 +1,145 @@
+"""
+core/pipeline.py — Shared AI pipeline: run_pipeline + _route_agent.
+
+Both functions are used by the streaming and non-streaming chat endpoints.
+They reference core.state.engine and core.state.conversation (set at lifespan startup).
+"""
+
+import core.state as state
+from core.log import get_logger
+from core.language import detect_language
+from core.router import apply_keyword_safety_net
+from db.redis_store import (
+    get_human_mode,
+    get_user_memory,
+    get_user_phone,
+    update_user_memory,
+    get_user_language,
+    set_user_language,
+    get_conversation,
+    save_conversation,
+    set_last_agent,
+    track_agent_usage,
+    track_skill_usage,
+    update_persona,
+)
+from agents import supervisor, broker_agent, booking_agent, profile_agent, default_agent
+
+logger = get_logger("pipeline")
+
+
+async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
+    """Run the full supervisor → agent pipeline. Returns (response, agent_name, language)."""
+    # Human takeover bypass — admin is handling this user manually
+    if get_human_mode(user_id):
+        conv = get_conversation(user_id)
+        conv.append({"role": "user", "content": message})
+        save_conversation(user_id, conv)
+        return "", "human", get_user_language(user_id) or "en"
+
+    # Update cross-session memory (only bump session_count on first message of a session)
+    mem = get_user_memory(user_id)
+    updates = {"phone_collected": bool(get_user_phone(user_id))}
+    # Conversation history is empty on first message → new session
+    if not get_conversation(user_id):
+        updates["session_count"] = mem.get("session_count", 0) + 1
+    update_user_memory(user_id, **updates)
+
+    # Detect and persist persona from user message (non-blocking)
+    update_persona(user_id, message)
+
+    # Detect language from message
+    detected_lang = detect_language(message)
+    stored_lang = get_user_language(user_id)
+    language = detected_lang if detected_lang != "en" else stored_lang
+    if detected_lang != "en":
+        set_user_language(user_id, detected_lang)
+
+    # Load conversation history + summarize if needed
+    messages = await state.conversation.add_user_message_with_summary(user_id, message)
+
+    # SKILL RESOLUTION ORDER (broker agent only):
+    # 1. Supervisor LLM classifies → {"agent": str, "skills": list[str]}
+    # 2. Keyword safety net overrides agent if LLM misclassifies (e.g. booking
+    #    intent mis-routed to broker). If it fires, skills are cleared — they
+    #    were computed for the wrong agent.
+    # 3. If broker has no skills after step 2, keyword heuristic fills them in
+    #    (detect_skills_heuristic). This is the last-resort fallback.
+    route_result = await supervisor.route(state.engine, messages)
+    agent_name = route_result["agent"]
+    skills = route_result.get("skills", [])
+
+    original_agent = agent_name
+    agent_name = apply_keyword_safety_net(agent_name, message, user_id)
+    if agent_name != original_agent:
+        skills = []  # Safety net fired — skills from wrong agent are invalid
+
+    if agent_name == "broker" and not skills:
+        from skills.skill_map import detect_skills_heuristic
+        skills = detect_skills_heuristic(message)
+
+    logger.info("user=%s agent=%s lang=%s msg=%s", user_id, agent_name, language, message[:60])
+
+    # Track agent usage + skill usage for analytics
+    track_agent_usage(user_id, agent_name)
+    if skills:
+        track_skill_usage(skills)
+
+    # Step 2: Run selected agent (with language + skills for broker)
+    if agent_name == "broker":
+        response = await broker_agent.run(state.engine, messages, user_id, language=language, skills=skills)
+    else:
+        agent_map = {
+            "default": default_agent.run,
+            "booking": booking_agent.run,
+            "profile": profile_agent.run,
+        }
+        agent_fn = agent_map.get(agent_name, default_agent.run)
+        response = await agent_fn(state.engine, messages, user_id, language=language)
+
+    # Track last active agent for multi-turn continuations
+    set_last_agent(user_id, agent_name)
+
+    # Save assistant response to history
+    state.conversation.add_assistant_message(user_id, response)
+
+    return response, agent_name, language
+
+
+async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict], str, list[str]]:
+    """Shared routing logic: returns (agent_name, messages, language, skills).
+
+    Applies supervisor + keyword safety net + last-agent fallback + skill detection —
+    identical to run_pipeline but without running the agent itself.
+    """
+    # Detect language
+    detected_lang = detect_language(message)
+    stored_lang = get_user_language(user_id)
+    language = detected_lang if detected_lang != "en" else stored_lang
+    if detected_lang != "en":
+        set_user_language(user_id, detected_lang)
+
+    messages = await state.conversation.add_user_message_with_summary(user_id, message)
+
+    route_result = await supervisor.route(state.engine, messages)
+    agent_name = route_result["agent"]
+    skills = route_result.get("skills", [])
+
+    # Safety net: keyword-based override if supervisor misclassifies
+    original_agent = agent_name
+    agent_name = apply_keyword_safety_net(agent_name, message, user_id)
+    # If safety net changed the agent, skills are no longer valid
+    if agent_name != original_agent:
+        skills = []
+    # Keyword fallback for broker skill detection
+    if agent_name == "broker" and not skills:
+        from skills.skill_map import detect_skills_heuristic
+        skills = detect_skills_heuristic(message)
+
+    # Track agent usage + skill usage for analytics
+    track_agent_usage(user_id, agent_name)
+    if skills:
+        track_skill_usage(skills)
+
+    logger.info("user=%s agent=%s lang=%s skills=%s msg=%s", user_id, agent_name, language, skills, message[:60])
+    return agent_name, messages, language, skills
