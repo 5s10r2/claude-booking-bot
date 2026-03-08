@@ -1295,25 +1295,29 @@ async def admin_backfill_users():
     Returns count of users added.
     """
     import time as _time
-    from db.redis_store import _r
-    r = _r()
-    added = 0
-    # Scan for all conversation keys
-    cursor = 0
-    while True:
-        cursor, keys = r.scan(cursor, match="*:conversation", count=200)
-        for key in keys:
-            key_str = key if isinstance(key, str) else key.decode()
-            uid = key_str.replace(":conversation", "")
-            if not uid:
-                continue
-            # Use NX so we don't overwrite entries already added by save_conversation()
-            result = r.zadd("active_users", {uid: _time.time()}, nx=True)
-            added += result
-        if cursor == 0:
-            break
-    total = r.zcard("active_users")
-    return {"ok": True, "added": added, "total_in_set": total}
+    import traceback
+    try:
+        from db.redis_store import _r
+        r = _r()
+        added = 0
+        # Scan for all conversation keys
+        cursor = 0
+        while True:
+            cursor, keys = r.scan(cursor, match="*:conversation", count=200)
+            for key in keys:
+                key_str = key if isinstance(key, str) else key.decode()
+                uid = key_str.replace(":conversation", "")
+                if not uid:
+                    continue
+                # Use NX so we don't overwrite entries already added by save_conversation()
+                result = r.zadd("active_users", {uid: _time.time()}, nx=True)
+                added += int(result or 0)
+            if cursor == 0:
+                break
+        total = r.zcard("active_users")
+        return {"ok": True, "added": added, "total_in_set": total}
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc), "trace": traceback.format_exc()[-800:]})
 
 
 if __name__ == "__main__":
