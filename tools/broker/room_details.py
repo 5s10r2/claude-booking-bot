@@ -4,6 +4,28 @@ from config import settings
 from utils.properties import find_property
 
 
+async def _fetch_rooms_raw(eazypg_id: str) -> list:
+    """Fetch raw room list from API. Used by compare_properties.
+
+    Returns a list of room dicts on success, [] on any failure or missing ID.
+    Unlike fetch_room_details(), this returns structured data, not a
+    formatted string — callers are responsible for rendering.
+    """
+    if not eazypg_id:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{settings.RENTOK_API_BASE_URL}/bookingBot/getAvailableRoomFromEazyPGID",
+                params={"eazypg_id": eazypg_id},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("rooms", data.get("data", []))
+    except Exception:
+        return []
+
+
 async def fetch_room_details(user_id: str, property_name: str, **kwargs) -> str:
     prop = find_property(user_id, property_name)
     if not prop:

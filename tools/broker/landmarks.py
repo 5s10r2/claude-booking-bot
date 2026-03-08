@@ -4,7 +4,8 @@ import os
 
 from config import settings
 from utils.properties import find_property as _find_prop
-from utils.retry import http_post, http_get
+from utils.geo import geocode_address
+from utils.retry import http_get
 from core.log import get_logger
 
 logger = get_logger("tools.landmarks")
@@ -159,16 +160,7 @@ async def fetch_landmarks(user_id: str, landmark_name: str, property_name: str, 
     if not prop_lat or not prop_long:
         return "Property coordinates not available."
 
-    try:
-        geo_data = await http_post(
-            f"{settings.RENTOK_API_BASE_URL}/property/getLatLongProperty",
-            json={"address": landmark_name},
-        )
-    except Exception as e:
-        return f"Error finding landmark: {str(e)}"
-
-    landmark_lat = geo_data.get("lat", geo_data.get("latitude", ""))
-    landmark_long = geo_data.get("long", geo_data.get("longitude", ""))
+    landmark_lat, landmark_long = await geocode_address(landmark_name)
     if not landmark_lat or not landmark_long:
         return f"Could not find coordinates for '{landmark_name}'."
 
@@ -212,20 +204,9 @@ async def estimate_commute(
 
     # --- Driving estimate via OSRM ---
     driving_info = ""
-    dest_lat, dest_long = 0.0, 0.0
-    try:
-        geo_data = await http_post(
-            f"{settings.RENTOK_API_BASE_URL}/property/getLatLongProperty",
-            json={"address": destination},
-        )
-        dest_lat = float(geo_data.get("lat", geo_data.get("latitude", 0)))
-        dest_long = float(geo_data.get("long", geo_data.get("longitude", 0)))
-    except Exception as e:
-        logger.warning("Geocoding destination failed: %s", e)
-        return f"Could not geocode '{destination}'. Please check the address and try again."
-
+    dest_lat, dest_long = await geocode_address(destination)
     if not dest_lat or not dest_long:
-        return f"Could not find coordinates for '{destination}'. Please try a more specific address."
+        return f"Could not find coordinates for '{destination}'. Please check the address and try again."
 
     if dest_lat and dest_long:
         try:

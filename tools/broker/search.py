@@ -22,6 +22,7 @@ from db.redis_store import (
     get_user_memory,
     _r as _redis,
 )
+from utils.geo import geocode_address
 from utils.scoring import match_score as calc_match_score
 
 
@@ -60,25 +61,6 @@ def _set_search_cache(payload: dict, results: list) -> None:
         logger.warning("cache SET failed: %s", e)
 
 
-async def _geocode_location(location: str) -> tuple:
-    """Convert a location string to lat/long using Rentok's geocoding API."""
-    from utils.retry import http_post
-
-    try:
-        resp_data = await http_post(
-            f"{settings.RENTOK_API_BASE_URL}/property/getLatLongProperty",
-            json={"address": location},
-            timeout=10,
-        )
-        data = resp_data.get("data", {}).get("data", {})
-        lat = data.get("lat")
-        lng = data.get("lng")
-        if lat and lng:
-            return float(lat), float(lng)
-    except Exception as e:
-        logger.warning("geocode error for '%s': %s", location, e)
-    return None, None
-
 
 async def _geocode_properties(properties: list[dict], limit: int = 5) -> None:
     """Geocode property addresses concurrently to fill in missing lat/lng.
@@ -96,7 +78,7 @@ async def _geocode_properties(properties: list[dict], limit: int = 5) -> None:
             addr = p.get("p_pg_name", "")
         if not addr:
             return
-        lat, lng = await _geocode_location(addr)
+        lat, lng = await geocode_address(addr)
         if lat and lng:
             p["_geocoded_lat"] = str(lat)
             p["_geocoded_lng"] = str(lng)

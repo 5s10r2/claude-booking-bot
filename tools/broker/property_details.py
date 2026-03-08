@@ -6,6 +6,26 @@ from utils.api import check_rentok_response
 from utils.properties import find_property as _find_property
 
 
+async def _fetch_details_raw(prop_id: str) -> dict:
+    """Fetch raw property details dict from API. Used by compare_properties.
+
+    Returns the property_data dict on success, {} on any failure.
+    Unlike fetch_property_details(), this returns structured data, not a
+    formatted string — callers are responsible for rendering.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{settings.RENTOK_API_BASE_URL}/property/property-details-bots",
+                json={"property_id": prop_id},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("property_data", data.get("data", {})) or {}
+    except Exception:
+        return {}
+
+
 async def fetch_property_details(user_id: str, property_name: str, **kwargs) -> str:
     prop = _find_property(user_id, property_name)
     if not prop:

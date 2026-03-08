@@ -7,49 +7,14 @@ Reduces comparison from 4+ LLM turns to 1 tool call + 1 response.
 
 import asyncio
 
-import httpx
-
-from config import settings
 from core.log import get_logger
 from db.redis_store import get_preferences, get_user_memory
+from tools.broker.property_details import _fetch_details_raw as _fetch_details
+from tools.broker.room_details import _fetch_rooms_raw as _fetch_rooms
 from utils.properties import find_property as _find_property
 from utils.scoring import match_score as calc_match_score
 
 logger = get_logger("tools.compare")
-
-
-async def _fetch_details(prop_id: str) -> dict:
-    """Fetch property details from API. Returns raw dict or empty on failure."""
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"{settings.RENTOK_API_BASE_URL}/property/property-details-bots",
-                json={"property_id": prop_id},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("property_data", data.get("data", {})) or {}
-    except Exception as e:
-        logger.warning("compare: details fetch failed for %s: %s", prop_id, e)
-        return {}
-
-
-async def _fetch_rooms(eazypg_id: str) -> list:
-    """Fetch room details. Returns list or empty on failure."""
-    if not eazypg_id:
-        return []
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                f"{settings.RENTOK_API_BASE_URL}/bookingBot/getAvailableRoomFromEazyPGID",
-                params={"eazypg_id": eazypg_id},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("rooms", data.get("data", []))
-    except Exception as e:
-        logger.warning("compare: rooms fetch failed for %s: %s", eazypg_id, e)
-        return []
 
 
 async def compare_properties(
@@ -124,7 +89,7 @@ async def compare_properties(
             try:
                 total_beds += int(beds)
             except (ValueError, TypeError):
-                pass
+                pass  # beds_available may be "?" or empty string — skip, don't crash
 
         # Custom match score
         prop_data = {

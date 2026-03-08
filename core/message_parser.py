@@ -275,7 +275,7 @@ def _build_carousel_parts(
                 try:
                     score = str(round(float(raw_score)))
                 except (ValueError, TypeError):
-                    pass
+                    pass  # Non-numeric score from Redis — leave score as ""
             amenities = redis_info.get("amenities", "")
 
         properties.append({
@@ -319,7 +319,7 @@ def _build_carousel_parts(
         try:
             map_center = {"lat": float(search_lat), "lng": float(search_lng)}
         except (ValueError, TypeError):
-            pass
+            pass  # Malformed coords in Redis — fall through to property-average fallback below
     if not map_center:
         # Fallback: average of property coordinates
         valid_coords = [(float(p["lat"]), float(p["lng"])) for p in properties if p.get("lat") and p.get("lng")]

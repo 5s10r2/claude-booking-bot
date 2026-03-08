@@ -183,18 +183,22 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     # Load conversation history + summarize if needed
     messages = await conversation.add_user_message_with_summary(user_id, message)
 
-    # Step 1: Supervisor routes to agent + detects skills
+    # SKILL RESOLUTION ORDER (broker agent only):
+    # 1. Supervisor LLM classifies → {"agent": str, "skills": list[str]}
+    # 2. Keyword safety net overrides agent if LLM misclassifies (e.g. booking
+    #    intent mis-routed to broker). If it fires, skills are cleared — they
+    #    were computed for the wrong agent.
+    # 3. If broker has no skills after step 2, keyword heuristic fills them in
+    #    (detect_skills_heuristic). This is the last-resort fallback.
     route_result = await supervisor.route(engine, messages)
     agent_name = route_result["agent"]
     skills = route_result.get("skills", [])
 
-    # Safety net: keyword-based override if supervisor misclassifies
     original_agent = agent_name
     agent_name = apply_keyword_safety_net(agent_name, message, user_id)
-    # If safety net changed the agent, skills are no longer valid
     if agent_name != original_agent:
-        skills = []
-    # Keyword fallback for broker skill detection
+        skills = []  # Safety net fired — skills from wrong agent are invalid
+
     if agent_name == "broker" and not skills:
         from skills.skill_map import detect_skills_heuristic
         skills = detect_skills_heuristic(message)

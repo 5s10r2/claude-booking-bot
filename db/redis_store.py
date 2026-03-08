@@ -64,7 +64,7 @@ def _json_get(key: str, default=None):
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        pass
+        pass  # Not JSON — fall through to pickle backward-compat path below
     # Backward compat: try pickle for keys written before migration
     try:
         return pickle.loads(raw)
@@ -751,7 +751,7 @@ def _calculate_lead_score(mem: dict) -> int:
             weeks_inactive = days_inactive // 7
             score -= min(20, weeks_inactive * 5)
         except (ValueError, TypeError):
-            pass
+            pass  # last_seen may be missing or malformed — skip decay, keep base score
 
     return max(0, min(100, score))
 
@@ -829,7 +829,7 @@ def build_returning_user_context(user_id: str) -> str:
         try:
             days_since = (date.today() - date.fromisoformat(last_seen_str)).days
         except (ValueError, TypeError):
-            pass
+            pass  # last_seen missing or malformed — days_since stays 0, no freshness warning
 
     parts = []
     parts.append(f"RETURNING USER (session #{mem['session_count'] + 1}):")
@@ -973,5 +973,5 @@ def cancel_followups(user_id: str, followup_type: str = "") -> int:
                     _r().zrem(FOLLOWUP_KEY, raw)
                     removed += 1
         except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
+            pass  # Corrupt followup entry in sorted set — skip it, don't abort cleanup
     return removed
