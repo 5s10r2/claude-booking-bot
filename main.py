@@ -10,6 +10,8 @@ Endpoints:
 """
 
 import json
+import os
+import uuid as uuid_lib
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -69,6 +71,11 @@ from db.redis_store import (
     save_conversation,
     get_preferences,
     get_last_agent,
+    get_brand_config,
+    set_brand_config,
+    get_brand_wa_config,
+    get_brand_by_token,
+    _json_set,
 )
 from agents import supervisor, default_agent, broker_agent, booking_agent, profile_agent
 from channels.whatsapp import send_text, send_carousel, send_images
@@ -89,6 +96,16 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
     if api_key != expected:
         logger.warning("Rejected request — invalid or missing API key")
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+async def require_brand_api_key(api_key: str = Security(_api_key_header)) -> str:
+    """Brand endpoint auth — any non-empty key is accepted; isolation by hash."""
+    if not api_key:
+        raise HTTPException(status_code=401, detail="X-API-Key header required")
+    return api_key
+
+
+CHAT_BASE_URL = os.getenv("CHAT_BASE_URL", "https://eazypg-chat.vercel.app")
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +578,23 @@ async def whatsapp_webhook(request: Request):
         is_template=False,
         pg_ids=pg_ids_val,
     )
+
+    # Hydrate brand config from WhatsApp phone_number_id
+    # value is already extracted above; metadata.phone_number_id identifies the brand
+    phone_number_id = value.get("metadata", {}).get("phone_number_id")
+    if phone_number_id:
+        brand_cfg = get_brand_wa_config(phone_number_id)
+        if brand_cfg:
+            hydrated = {
+                "pg_ids": brand_cfg.get("pg_ids", []),
+                "whatsapp_phone_number_id": brand_cfg.get("whatsapp_phone_number_id", ""),
+                "whatsapp_access_token": brand_cfg.get("whatsapp_access_token", ""),
+                "waba_id": brand_cfg.get("waba_id", ""),
+                "is_meta": brand_cfg.get("is_meta", True),
+                "brand_name": brand_cfg.get("brand_name", ""),
+            }
+            # Write with 1-hour TTL so stale creds don't linger
+            _json_set(f"{user_phone}:account_values", hydrated, ex=3600)
 
     # Run pipeline
     try:
@@ -1180,6 +1214,69 @@ async def admin_set_flags(req: FlagUpdateRequest):
     if req.KYC_ENABLED is not None:
         settings.KYC_ENABLED = req.KYC_ENABLED
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Admin — brand configuration (multi-tenant white-label)
+# ---------------------------------------------------------------------------
+
+class BrandConfigRequest(BaseModel):
+    pg_ids: list[str] | None = None
+    brand_name: str | None = None
+    cities: str | None = None
+    areas: str | None = None
+    whatsapp_phone_number_id: str | None = None
+    whatsapp_access_token: str | None = None  # "••••xxxx" → preserve existing token
+    waba_id: str | None = None
+    is_meta: bool | None = None
+    # brand_link_token is auto-generated server-side, never in request body
+
+
+@app.get("/admin/brand-config")
+async def admin_get_brand_config(api_key: str = Depends(require_brand_api_key)):
+    """Return brand config for the given API key. Access token is masked."""
+    config = dict(get_brand_config(api_key) or {})
+    token = config.get("whatsapp_access_token", "")
+    if token:
+        config["whatsapp_access_token"] = "••••" + token[-4:]
+    link_token = config.get("brand_link_token", "")
+    chatbot_url = f"{CHAT_BASE_URL}?brand={link_token}" if link_token else None
+    return {"is_configured": bool(config.get("pg_ids")), "chatbot_url": chatbot_url, **config}
+
+
+@app.post("/admin/brand-config")
+async def admin_set_brand_config(body: BrandConfigRequest, api_key: str = Depends(require_brand_api_key)):
+    """Upsert brand config. Partial updates are merged with existing config."""
+    existing = dict(get_brand_config(api_key) or {})
+    merged = {**existing, **{k: v for k, v in body.dict().items() if v is not None}}
+    wa_token = merged.get("whatsapp_access_token", "")
+    if wa_token.startswith("••••"):
+        # Masked value submitted — preserve the real token already in Redis
+        merged["whatsapp_access_token"] = existing.get("whatsapp_access_token", "")
+    if not merged.get("brand_link_token"):
+        # Auto-generate a permanent UUID on first save
+        merged["brand_link_token"] = str(uuid_lib.uuid4())
+    merged["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    if "created_at" not in merged:
+        merged["created_at"] = merged["updated_at"]
+    set_brand_config(api_key, merged)
+    return {"ok": True, "brand_link_token": merged["brand_link_token"]}
+
+
+# PUBLIC endpoint — no auth — used by eazypg-chat to load brand config at startup
+@app.get("/brand-config")
+async def get_public_brand_config(token: str):
+    """Return public brand fields for a chatbot link token. No credentials exposed."""
+    config = get_brand_by_token(token)
+    if not config:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    return {
+        "pg_ids": config.get("pg_ids", []),
+        "brand_name": config.get("brand_name", ""),
+        "cities": config.get("cities", ""),
+        "areas": config.get("areas", ""),
+        "is_configured": bool(config.get("pg_ids")),
+    }
 
 
 # ---------------------------------------------------------------------------
