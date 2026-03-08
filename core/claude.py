@@ -182,6 +182,16 @@ class AnthropicEngine:
             logger.debug("stream stop_reason=%s", response.stop_reason)
 
             if response.stop_reason == "end_turn":
+                # Fire-and-forget cost tracking (non-blocking)
+                try:
+                    from db.redis_store import increment_session_cost
+                    usage = response.usage
+                    asyncio.create_task(asyncio.to_thread(
+                        increment_session_cost, user_id,
+                        usage.input_tokens, usage.output_tokens, model,
+                    ))
+                except Exception:
+                    pass  # intentional: metrics are best-effort
                 return  # all text already streamed via content_delta events
 
             if response.stop_reason == "tool_use":

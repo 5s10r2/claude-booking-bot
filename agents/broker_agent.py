@@ -12,7 +12,7 @@ from core.claude import AnthropicEngine
 from core.log import get_logger
 from core.prompts import BROKER_AGENT_PROMPT, format_prompt
 from core.tool_executor import ToolExecutor
-from db.redis_store import get_account_values, build_returning_user_context
+from db.redis_store import get_account_values, build_returning_user_context, get_property_id_for_search
 from tools.registry import get_schemas_for_agent, get_handlers_for_agent
 from utils.date import today_date, current_day
 
@@ -55,6 +55,7 @@ def get_config(user_id: str, language: str = "en", skills: list[str] | None = No
             "tools": tools,
             "model": settings.HAIKU_MODEL,
             "executor": executor,
+            "prop_ids": get_property_id_for_search(user_id),
         }
 
     # ── Dynamic skill path ─────────────────────────────────────────────
@@ -101,7 +102,33 @@ def get_config(user_id: str, language: str = "en", skills: list[str] | None = No
         "model": settings.HAIKU_MODEL,
         "executor": executor,
         "skills": skills,
+        "prop_ids": get_property_id_for_search(user_id),
     }
+
+
+async def _inject_doc_context(cfg: dict) -> None:
+    """Fetch property docs for pinned search results and append to system prompt.
+
+    Best-effort: silently skips if DB unavailable or no docs found.
+    Pops 'prop_ids' from cfg so callers don't pass it to the API.
+    """
+    prop_ids = cfg.pop("prop_ids", [])
+    if not prop_ids:
+        return
+    try:
+        from db import postgres as pg
+        from utils.property_docs import format_property_docs
+        docs = await pg.get_property_documents_text(prop_ids[:3])
+        if docs:
+            doc_ctx = format_property_docs(docs)
+            sp = cfg["system_prompt"]
+            if isinstance(sp, list):
+                tail = (sp[1] + "\n\n" + doc_ctx) if len(sp) > 1 else doc_ctx
+                cfg["system_prompt"] = [sp[0], tail]
+            else:
+                cfg["system_prompt"] = sp + "\n\n" + doc_ctx
+    except Exception:
+        pass  # intentional: KB injection is best-effort
 
 
 async def run(
@@ -112,6 +139,7 @@ async def run(
     skills: list[str] | None = None,
 ) -> str:
     cfg = get_config(user_id, language=language, skills=skills)
+    await _inject_doc_context(cfg)
 
     original_executor = engine.tool_executor
     engine.tool_executor = cfg["executor"]

@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
     SONNET_MODEL: str = "claude-sonnet-4-6"
 
+    # Cost per million tokens (USD) — used by increment_session_cost
+    COST_PER_MTK: dict = {
+        "claude-haiku-4-5-20251001": {"in": 0.80,  "out": 4.00},
+        "claude-sonnet-4-6":         {"in": 3.00,  "out": 15.00},
+    }
+
     # API auth (set in .env; if empty, auth is disabled)
     API_KEY: Optional[str] = None
 
