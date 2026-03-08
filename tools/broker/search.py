@@ -207,7 +207,7 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         redis_save_preferences(user_id, prefs)
 
     # Step 1: Geocode location to lat/long
-    lat, lng = await _geocode_location(location)
+    lat, lng = await geocode_address(location)
     if lat is None or lng is None:
         return f"Could not find coordinates for '{location}'. Please try a more specific area or city name."
 

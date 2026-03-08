@@ -22,7 +22,7 @@ log = get_logger(__name__)
 SKILL_TOOLS: dict[str, list[str]] = {
     "qualify_new":       ["save_preferences"],
     "qualify_returning": ["save_preferences"],
-    "search":            ["save_preferences", "search_properties"],
+    "search":            ["save_preferences", "search_properties", "fetch_properties_by_query"],
     "details":           ["fetch_property_details", "fetch_room_details", "fetch_property_images"],
     "compare":           ["compare_properties", "fetch_landmarks", "fetch_nearby_places"],
     "commute":           ["estimate_commute", "fetch_landmarks"],
