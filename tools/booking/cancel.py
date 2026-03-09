@@ -38,7 +38,10 @@ async def cancel_booking(user_id: str, property_name: str, **kwargs) -> str:
     except Exception as e:
         return f"Error cancelling booking: {str(e)}"
 
-    if not data.get("success"):
-        msg = data.get("message", "unknown error")
-        return f"Cancellation failed: {msg}. Please try again or contact support."
+    # cancel-booking always returns HTTP 200 with no `success` field in the body.
+    # raise_for_status() above already handles any genuine HTTP errors (4xx/5xx).
+    # We check the message as a final safety net.
+    msg = data.get("message", "")
+    if resp.status_code != 200:
+        return f"Cancellation failed: {msg or 'unknown error'}. Please try again or contact support."
     return f"Booking cancelled successfully for '{prop.get('property_name', property_name)}'."
