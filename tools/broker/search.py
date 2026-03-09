@@ -22,6 +22,7 @@ from db.redis_store import (
     get_user_memory,
     _r as _redis,
 )
+from utils.api import parse_amenities, parse_sharing_types
 from utils.geo import geocode_address
 from utils.scoring import match_score as calc_match_score
 
@@ -378,8 +379,10 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         min_token = p.get("p_min_token_amount", 1000)
         microsite_url = p.get("p_microsite_url", p.get("microsite_url", ""))
         match_score = p.get("_custom_score", p.get("p_match_score", p.get("match_score", "")))
-        amenities_raw = p.get("p_common_amenities", p.get("p_amenities", ""))
-        sharing_types_data = p.get("p_sharing_types_enabled", [])
+        # Normalise at write time → cache always contains clean strings,
+        # no downstream tool needs to know the raw API shape.
+        amenities_raw = parse_amenities(p.get("p_common_amenities", p.get("p_amenities", "")))
+        sharing_types_data = parse_sharing_types(p.get("p_sharing_types_enabled", []))
 
         info = {
             "property_name": property_name,

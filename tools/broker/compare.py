@@ -56,7 +56,7 @@ async def compare_properties(
     # Fetch details + rooms in parallel for all properties
     tasks = []
     for prop in props:
-        prop_id = prop.get("prop_id") or prop.get("pg_id", "")
+        prop_id = prop.get("prop_id") or prop.get("property_id", "")
         eazypg_id = prop.get("eazypg_id", "")
         tasks.append(_fetch_details(prop_id))
         tasks.append(_fetch_rooms(eazypg_id))

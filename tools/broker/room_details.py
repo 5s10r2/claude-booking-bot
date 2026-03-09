@@ -1,6 +1,7 @@
 import httpx
 
 from config import settings
+from utils.api import parse_amenities, parse_sharing_types
 from utils.properties import find_property
 
 
@@ -63,16 +64,17 @@ async def fetch_room_details(user_id: str, property_name: str, **kwargs) -> str:
     rooms = data.get("rooms", data.get("data", []))
     if not rooms:
         sharing_types = prop.get("sharing_types", [])
-        amenities = prop.get("amenities", "")
+        amenities_raw = prop.get("amenities", "")
         rent = prop.get("property_rent", "")
-        if sharing_types or amenities:
+        sharing_str = parse_sharing_types(sharing_types)
+        amenities_str = parse_amenities(amenities_raw)
+        if sharing_str or amenities_str:
             name = prop.get("property_name", property_name)
             result = f"Live bed availability for '{name}' isn't showing right now. From our listings:\n"
-            if sharing_types:
-                sharing_str = ", ".join(sharing_types) if isinstance(sharing_types, list) else str(sharing_types)
+            if sharing_str:
                 result += f"- Sharing options: {sharing_str}\n"
-            if amenities:
-                result += f"- Amenities: {amenities}\n"
+            if amenities_str:
+                result += f"- Amenities: {amenities_str}\n"
             if rent:
                 result += f"- Rent starts from: ₹{rent}/mo\n"
             result += "For confirmed availability, schedule a visit or call the property directly."
@@ -81,10 +83,12 @@ async def fetch_room_details(user_id: str, property_name: str, **kwargs) -> str:
 
     result = f"Available rooms at '{prop.get('property_name', property_name)}':\n"
     for room in rooms:
-        name = room.get("room_name", room.get("name", "Room"))
+        # API may use room_name, room_type, name, or room_no — try all
+        name = (room.get("room_name") or room.get("room_type") or room.get("name")
+                or (f"Room {room.get('room_no', room.get('number', ''))}" if room.get("room_no") or room.get("number") else "Room"))
         sharing = room.get("sharing_type", "")
         available = room.get("beds_available", room.get("available", ""))
-        amenities = room.get("amenities", "")
+        amenities = parse_amenities(room.get("amenities", ""))
         result += f"- {name}: {sharing} sharing, Available beds: {available}"
         if amenities:
             result += f", Amenities: {amenities}"

@@ -43,8 +43,15 @@ def get_last_search_results(user_id: str) -> list[dict]:
 # Shortlisted properties
 # ---------------------------------------------------------------------------
 
-def get_shortlisted_properties(user_id: str) -> list[dict]:
-    return _json_get(f"{user_id}:shortlisted", default=[])
+def get_shortlisted_properties(user_id: str) -> list:
+    """Return list of shortlisted property IDs.
+
+    Reads from user_memory['properties_shortlisted'] — the same key that
+    record_property_shortlisted() writes to. The old '{uid}:shortlisted'
+    key was never written to, causing D3 to always return empty.
+    """
+    memory = _json_get(f"{user_id}:user_memory") or {}
+    return memory.get("properties_shortlisted", [])
 
 
 # ---------------------------------------------------------------------------
