@@ -34,6 +34,7 @@ async def lifespan(app: FastAPI):
     # Startup
     await pg.init_pool()
     await pg.create_property_documents_table()
+    await pg.create_leads_table()
     init_registry()
 
     executor = ToolExecutor()

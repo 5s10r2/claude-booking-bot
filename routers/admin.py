@@ -23,6 +23,7 @@ Routes:
   POST   /admin/backfill-users
 """
 
+import asyncio
 import json as _json_module
 import time as _time
 import traceback
@@ -358,6 +359,52 @@ async def admin_command_center():
 # Leads
 # ---------------------------------------------------------------------------
 
+def _lead_row(uid: str) -> dict:
+    """Build the full 25-field lead dict for a single uid. DRY helper used by both endpoints."""
+    mem   = get_user_memory(uid)
+    prefs = get_preferences(uid)
+    phone = get_user_phone(uid) or ""
+    name  = mem.get("profile_name") or mem.get("name") or ""
+    cost  = get_session_cost(uid)
+
+    # Budget: prefer structured prefs, fall back to memory strings
+    budget_min = prefs.get("min_budget")
+    budget_max = prefs.get("max_budget") or mem.get("budget_max") or mem.get("budget")
+
+    return {
+        # Identity
+        "uid":              uid,
+        "name":             name,
+        "phone":            phone,
+        "phone_collected":  bool(mem.get("phone_collected", False)),
+        "persona":          mem.get("persona") or "",
+        # Funnel
+        "stage":            mem.get("funnel_max") or "",
+        "first_seen":       mem.get("first_seen") or "",
+        "last_seen":        mem.get("last_seen") or "",
+        "session_count":    int(mem.get("session_count") or 0),
+        # Engagement
+        "viewed_count":      len(mem.get("properties_viewed") or []),
+        "shortlisted_count": len(mem.get("properties_shortlisted") or []),
+        "visits_count":      len(mem.get("visits_scheduled") or []),
+        # Intent signals
+        "deal_breakers":    mem.get("deal_breakers") or [],
+        "must_haves":       mem.get("must_haves") or [],
+        "lead_score":       int(mem.get("lead_score") or 0),
+        # Location & Budget
+        "location_pref":    mem.get("location_preference") or mem.get("location_pref") or "",
+        "budget_min":       budget_min,
+        "budget_max":       budget_max,
+        "budget":           mem.get("budget") or "",
+        # Preferences
+        "property_type":    prefs.get("property_type") or "",
+        "amenities":        prefs.get("amenities") or prefs.get("must_have_amenities") or [],
+        "sharing_types":    prefs.get("sharing_types_enabled") or [],
+        # Cost
+        "cost_usd":         float(cost.get("cost_usd") or 0.0),
+    }
+
+
 @router.get("/admin/leads", dependencies=[Depends(verify_api_key)])
 async def admin_leads(
     stage: str = "",
@@ -379,7 +426,7 @@ async def admin_leads(
     for uid in uids:
         mem = get_user_memory(uid)
 
-        # Age filter — compare timestamp in sorted set
+        # Age filter
         if cutoff_ts:
             score = _r_score(uid)
             if score and score < cutoff_ts:
@@ -403,29 +450,31 @@ async def admin_leads(
             except (ValueError, TypeError):
                 pass
 
-        name = mem.get("profile_name") or mem.get("name") or ""
+        name  = mem.get("profile_name") or mem.get("name") or ""
         phone = get_user_phone(uid) or ""
 
         # Full-text search across name + phone
         if q and q.lower() not in name.lower() and q.lower() not in phone:
             continue
 
-        cost_data = get_session_cost(uid)
-        rows.append({
-            "uid":           uid,
-            "name":          name,
-            "phone":         phone,
-            "location_pref": mem.get("location_preference") or mem.get("location_pref") or "",
-            "budget":        budget_val,
-            "stage":         mem.get("funnel_max") or "",
-            "last_seen":     mem.get("last_seen") or "",
-            "lead_score":    mem.get("lead_score", 0),
-            "cost_usd":      cost_data.get("cost_usd", 0.0),
-        })
+        rows.append(_lead_row(uid))
 
     total = len(rows)
-    page = rows[offset: offset + limit]
+    page  = rows[offset: offset + limit]
+
+    # Persist enriched snapshot to PostgreSQL (fire-and-forget)
+    if rows:
+        asyncio.create_task(pg.upsert_leads(rows))
+
     return {"leads": page, "total": total, "offset": offset, "limit": limit}
+
+
+@router.get("/admin/leads/{uid}", dependencies=[Depends(verify_api_key)])
+async def admin_lead_detail(uid: str):
+    """Return the full 25-field profile for a single lead."""
+    row = _lead_row(uid)
+    asyncio.create_task(pg.upsert_leads([row]))
+    return row
 
 
 # ---------------------------------------------------------------------------

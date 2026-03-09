@@ -211,6 +211,108 @@ async def get_property_documents_text(property_ids: list[str], max_chars: int = 
     return results
 
 
+async def create_leads_table() -> None:
+    """Create the leads snapshot table (called on startup)."""
+    if _pool is None:
+        return
+    try:
+        await _pool.execute("""
+            CREATE TABLE IF NOT EXISTS leads (
+                uid               TEXT PRIMARY KEY,
+                name              TEXT,
+                phone             TEXT,
+                phone_collected   BOOLEAN   DEFAULT FALSE,
+                persona           TEXT,
+                stage             TEXT,
+                first_seen        TEXT,
+                last_seen         TEXT,
+                session_count     INTEGER   DEFAULT 0,
+                viewed_count      INTEGER   DEFAULT 0,
+                shortlisted_count INTEGER   DEFAULT 0,
+                visits_count      INTEGER   DEFAULT 0,
+                deal_breakers     JSONB     DEFAULT '[]',
+                must_haves        JSONB     DEFAULT '[]',
+                lead_score        INTEGER   DEFAULT 0,
+                location_pref     TEXT,
+                budget_min        NUMERIC,
+                budget_max        NUMERIC,
+                budget            TEXT,
+                property_type     TEXT,
+                amenities         JSONB     DEFAULT '[]',
+                sharing_types     JSONB     DEFAULT '[]',
+                cost_usd          NUMERIC   DEFAULT 0,
+                synced_at         TIMESTAMP DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_leads_stage     ON leads(stage);
+            CREATE INDEX IF NOT EXISTS idx_leads_score     ON leads(lead_score DESC);
+            CREATE INDEX IF NOT EXISTS idx_leads_last_seen ON leads(last_seen);
+        """)
+    except Exception as e:
+        logger.warning("create_leads_table: %s", e)
+
+
+async def upsert_leads(rows: list[dict]) -> None:
+    """Batch upsert enriched lead snapshots. Called fire-and-forget from admin endpoints."""
+    if _pool is None or not rows:
+        return
+    try:
+        await _pool.executemany(
+            """
+            INSERT INTO leads (
+                uid, name, phone, phone_collected, persona, stage,
+                first_seen, last_seen, session_count, viewed_count, shortlisted_count,
+                visits_count, deal_breakers, must_haves, lead_score, location_pref,
+                budget_min, budget_max, budget, property_type, amenities,
+                sharing_types, cost_usd, synced_at
+            )
+            VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NOW()
+            )
+            ON CONFLICT (uid) DO UPDATE SET
+                name=EXCLUDED.name, phone=EXCLUDED.phone,
+                phone_collected=EXCLUDED.phone_collected, persona=EXCLUDED.persona,
+                stage=EXCLUDED.stage, first_seen=EXCLUDED.first_seen,
+                last_seen=EXCLUDED.last_seen, session_count=EXCLUDED.session_count,
+                viewed_count=EXCLUDED.viewed_count, shortlisted_count=EXCLUDED.shortlisted_count,
+                visits_count=EXCLUDED.visits_count, deal_breakers=EXCLUDED.deal_breakers,
+                must_haves=EXCLUDED.must_haves, lead_score=EXCLUDED.lead_score,
+                location_pref=EXCLUDED.location_pref, budget_min=EXCLUDED.budget_min,
+                budget_max=EXCLUDED.budget_max, budget=EXCLUDED.budget,
+                property_type=EXCLUDED.property_type, amenities=EXCLUDED.amenities,
+                sharing_types=EXCLUDED.sharing_types, cost_usd=EXCLUDED.cost_usd,
+                synced_at=NOW()
+            """,
+            [
+                (
+                    r["uid"], r["name"], r["phone"],
+                    bool(r.get("phone_collected", False)),
+                    r.get("persona") or "",
+                    r.get("stage") or "",
+                    r.get("first_seen") or "",
+                    r.get("last_seen") or "",
+                    int(r.get("session_count") or 0),
+                    int(r.get("viewed_count") or 0),
+                    int(r.get("shortlisted_count") or 0),
+                    int(r.get("visits_count") or 0),
+                    json.dumps(r.get("deal_breakers") or []),
+                    json.dumps(r.get("must_haves") or []),
+                    int(r.get("lead_score") or 0),
+                    r.get("location_pref") or "",
+                    r.get("budget_min"),
+                    r.get("budget_max"),
+                    r.get("budget") or "",
+                    r.get("property_type") or "",
+                    json.dumps(r.get("amenities") or []),
+                    json.dumps(r.get("sharing_types") or []),
+                    float(r.get("cost_usd") or 0.0),
+                )
+                for r in rows
+            ],
+        )
+    except Exception as e:
+        logger.error("upsert_leads error: %s", e)
+
+
 async def delete_property_document(property_id: str, doc_id: int) -> bool:
     """Delete a document. Returns True if a row was deleted."""
     if _pool is None:
