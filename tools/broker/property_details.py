@@ -6,6 +6,20 @@ from utils.api import check_rentok_response
 from utils.properties import find_property as _find_property
 
 
+TOOL_SCHEMA = {
+    "name": "fetch_property_details",
+    "description": "Get comprehensive details about a specific property: amenities (common/food/services), notice period, agreement terms, check-in/out times, GST, property rules, reviews, FAQs, AND a list of available room types with rent. Preferred first call for detail requests. Has a Redis cache fallback if the API returns sparse data. Different endpoint from fetch_room_details.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact name of the property as shown in search results"},
+        },
+        "required": ["property_name"],
+    },
+}
+
+
 async def _fetch_details_raw(prop_id: str) -> dict:
     """Fetch raw property details dict from API. Used by compare_properties.
 

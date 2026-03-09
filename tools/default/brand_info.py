@@ -10,6 +10,17 @@ logger = get_logger("tools.brand_info")
 
 _BRAND_CACHE_TTL = 86400  # 24 hours
 
+TOOL_SCHEMA = {
+    "name": "brand_info",
+    "description": "Fetch brand and property information for the current platform. Returns rent ranges, amenities, property types, and coverage areas.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+        "required": [],
+    },
+}
+
 
 async def brand_info(user_id: str, **kwargs) -> str:
     pg_ids = get_whitelabel_pg_ids(user_id)

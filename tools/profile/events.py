@@ -3,6 +3,18 @@ import httpx
 from config import settings
 
 
+TOOL_SCHEMA = {
+    "name": "get_scheduled_events",
+    "description": "Get all scheduled visits, calls, and bookings for the user.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+        "required": [],
+    },
+}
+
+
 async def get_scheduled_events(user_id: str, **kwargs) -> str:
     try:
         async with httpx.AsyncClient(timeout=15) as client:

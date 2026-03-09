@@ -10,6 +10,35 @@ from core.log import get_logger
 
 logger = get_logger("tools.landmarks")
 
+FETCH_LANDMARKS_SCHEMA = {
+    "name": "fetch_landmarks",
+    "description": "Get distance from a landmark to a specific property.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "landmark_name": {"type": "string", "description": "Name of the landmark or place"},
+            "property_name": {"type": "string", "description": "Exact property name"},
+        },
+        "required": ["landmark_name", "property_name"],
+    },
+}
+
+ESTIMATE_COMMUTE_SCHEMA = {
+    "name": "estimate_commute",
+    "description": "Estimate commute time from a property to a destination (office, college, etc.) via car AND public transit (metro/train). Returns driving time and transit route with walking + ride breakdown.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+            "destination": {"type": "string", "description": "Destination name or address (e.g. office name, college, area)"},
+            "city": {"type": "string", "description": "City name (optional, auto-detected from property data)"},
+        },
+        "required": ["property_name", "destination"],
+    },
+}
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------

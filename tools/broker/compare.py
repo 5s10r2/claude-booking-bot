@@ -16,6 +16,22 @@ from utils.scoring import match_score as calc_match_score
 
 logger = get_logger("tools.compare")
 
+TOOL_SCHEMA = {
+    "name": "compare_properties",
+    "description": "Compare 2-3 properties side-by-side. Fetches details and rooms for all properties in parallel and returns a structured comparison with match scores and a recommendation. Use when user says 'compare', 'which is better', 'X vs Y'.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_names": {
+                "type": "string",
+                "description": "Comma-separated property names to compare (2-3 properties). E.g. 'Stanza Living, Zolo Stays'",
+            },
+        },
+        "required": ["property_names"],
+    },
+}
+
 
 async def compare_properties(
     user_id: str,

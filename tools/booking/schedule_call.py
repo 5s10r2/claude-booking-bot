@@ -5,6 +5,23 @@ from utils.date import transcribe_date
 from utils.properties import find_property as _find_property
 
 
+TOOL_SCHEMA = {
+    "name": "save_call_time",
+    "description": "Schedule a phone call or video tour with a property. Available 10 AM - 9 PM, next 7 days.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+            "visit_date": {"type": "string", "description": "Date as stated by user"},
+            "visit_time": {"type": "string", "description": "Time as stated by user"},
+            "visit_type": {"type": "string", "description": "'Phone Call' or 'Video Tour'"},
+        },
+        "required": ["property_name", "visit_date", "visit_time"],
+    },
+}
+
+
 async def save_call_time(
     user_id: str,
     property_name: str,

@@ -1,6 +1,18 @@
 from db.redis_store import get_preferences
 
 
+TOOL_SCHEMA = {
+    "name": "fetch_profile_details",
+    "description": "Fetch the user's saved profile and search preferences.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+        "required": [],
+    },
+}
+
+
 async def fetch_profile_details(user_id: str, **kwargs) -> str:
     try:
         prefs = get_preferences(user_id)

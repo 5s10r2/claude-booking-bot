@@ -6,6 +6,20 @@ from utils.api import check_rentok_response
 from utils.properties import find_property
 
 
+TOOL_SCHEMA = {
+    "name": "fetch_property_images",
+    "description": "Fetch photo gallery URLs for a specific property. Call in parallel with fetch_property_details and fetch_room_details for comprehensive detail responses — no extra latency.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+        },
+        "required": ["property_name"],
+    },
+}
+
+
 async def fetch_property_images(user_id: str, property_name: str, **kwargs) -> str:
     prop = find_property(user_id, property_name)
     if not prop:

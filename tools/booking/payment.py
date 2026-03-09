@@ -17,6 +17,30 @@ from utils.retry import http_get, http_post
 
 logger = get_logger("tools.payment")
 
+CREATE_PAYMENT_LINK_SCHEMA = {
+    "name": "create_payment_link",
+    "description": "Generate a payment link for the token amount to reserve a bed/room.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+        },
+        "required": ["property_name"],
+    },
+}
+
+VERIFY_PAYMENT_SCHEMA = {
+    "name": "verify_payment",
+    "description": "Verify and record a completed payment for a property reservation.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+        "required": [],
+    },
+}
+
 
 async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str:
     # Phone validation first — required before any property lookup or API call

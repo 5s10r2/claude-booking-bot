@@ -5,6 +5,23 @@ from utils.date import transcribe_date
 from utils.properties import find_property as _find_property
 
 
+TOOL_SCHEMA = {
+    "name": "reschedule_booking",
+    "description": "Reschedule an existing visit or call to a new date/time.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+            "visit_date": {"type": "string", "description": "New date"},
+            "visit_time": {"type": "string", "description": "New time"},
+            "visit_type": {"type": "string", "description": "Physical visit, Phone Call, or Video Tour"},
+        },
+        "required": ["property_name"],
+    },
+}
+
+
 async def reschedule_booking(
     user_id: str,
     property_name: str,

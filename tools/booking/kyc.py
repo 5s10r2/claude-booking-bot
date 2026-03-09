@@ -8,6 +8,43 @@ from db.redis_store import set_aadhar_user_name, set_aadhar_gender, get_user_pho
 
 logger = get_logger("tools.kyc")
 
+FETCH_KYC_STATUS_SCHEMA = {
+    "name": "fetch_kyc_status",
+    "description": "Check if the user has completed KYC (Aadhaar verification).",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+        "required": [],
+    },
+}
+
+INITIATE_KYC_SCHEMA = {
+    "name": "initiate_kyc",
+    "description": "Start KYC process by submitting user's 12-digit Aadhaar number. An OTP will be sent to their registered phone.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "aadhar_number": {"type": "string", "description": "12-digit Aadhaar number"},
+        },
+        "required": ["aadhar_number"],
+    },
+}
+
+VERIFY_KYC_SCHEMA = {
+    "name": "verify_kyc",
+    "description": "Complete KYC by verifying the OTP sent to user's phone.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "otp": {"type": "string", "description": "OTP received by the user"},
+        },
+        "required": ["otp"],
+    },
+}
+
 
 async def fetch_kyc_status(user_id: str, **kwargs) -> str:
     """Check if the user has completed KYC verification."""

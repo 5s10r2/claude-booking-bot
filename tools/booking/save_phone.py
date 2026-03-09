@@ -3,6 +3,23 @@ import re
 from db.redis_store import set_user_phone, get_user_phone
 
 
+TOOL_SCHEMA = {
+    "name": "save_phone_number",
+    "description": "Save the user's 10-digit Indian mobile number so it can be used for payment links, visit scheduling, and KYC. Call this when the user provides their phone number and a mobile number is required to proceed.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "phone_number": {
+                "type": "string",
+                "description": "The user's mobile number (10-digit Indian number, with or without +91 prefix)",
+            },
+        },
+        "required": ["phone_number"],
+    },
+}
+
+
 def save_phone_number(user_id: str, phone_number: str, **kwargs) -> str:
     """
     Validate and persist the user's phone number so subsequent booking

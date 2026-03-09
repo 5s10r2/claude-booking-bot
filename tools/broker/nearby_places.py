@@ -2,6 +2,22 @@ from utils.properties import find_property
 from utils.retry import http_get
 
 
+TOOL_SCHEMA = {
+    "name": "fetch_nearby_places",
+    "description": "Find nearby points of interest (restaurants, metro stations, hospitals, etc.) around a property.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+            "radius": {"type": "integer", "description": "Search radius in meters (default 5000)"},
+            "amenity": {"type": "string", "description": "Type of place to search for, e.g. restaurant, hospital, school"},
+        },
+        "required": ["property_name"],
+    },
+}
+
+
 async def fetch_nearby_places(
     user_id: str,
     property_name: str,

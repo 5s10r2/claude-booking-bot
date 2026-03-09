@@ -9,6 +9,22 @@ from utils.retry import http_post
 
 logger = get_logger("tools.schedule_visit")
 
+TOOL_SCHEMA = {
+    "name": "save_visit_time",
+    "description": "Schedule a physical visit to a property. Visits available 9 AM - 5 PM, next 7 days, 30-minute slots.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+            "visit_date": {"type": "string", "description": "Visit date as stated by user"},
+            "visit_time": {"type": "string", "description": "Visit time as stated by user"},
+            "visit_type": {"type": "string", "description": "Always 'Physical visit'"},
+        },
+        "required": ["property_name", "visit_date", "visit_time"],
+    },
+}
+
 
 async def save_visit_time(
     user_id: str,

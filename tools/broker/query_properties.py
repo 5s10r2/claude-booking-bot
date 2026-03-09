@@ -5,6 +5,20 @@ from db.redis_store import get_whitelabel_pg_ids
 from utils.api import RentokAPIError, check_rentok_response
 
 
+TOOL_SCHEMA = {
+    "name": "fetch_properties_by_query",
+    "description": "Fetch properties matching a text query/name.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "query": {"type": "string", "description": "Property name or search query"},
+        },
+        "required": ["query"],
+    },
+}
+
+
 async def fetch_properties_by_query(user_id: str, query: str, **kwargs) -> str:
     pg_ids = get_whitelabel_pg_ids(user_id)
 

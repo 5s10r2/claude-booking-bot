@@ -28,6 +28,19 @@ from utils.scoring import match_score as calc_match_score
 
 SEARCH_CACHE_TTL = 900  # 15 minutes
 
+TOOL_SCHEMA = {
+    "name": "search_properties",
+    "description": "Search for properties based on saved preferences. Returns up to 20 properties with name, location, rent, images, and match scores. Show 5 at a time.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "radius_flag": {"type": "boolean", "description": "Set true to expand search radius by 5km"},
+        },
+        "required": [],
+    },
+}
+
 
 def _search_cache_key(payload: dict) -> str:
     """Deterministic cache key from search payload."""

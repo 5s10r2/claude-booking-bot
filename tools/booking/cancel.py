@@ -4,6 +4,20 @@ from config import settings
 from utils.properties import find_property as _find_property
 
 
+TOOL_SCHEMA = {
+    "name": "cancel_booking",
+    "description": "Cancel an existing visit, call, or booking for a property.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+        },
+        "required": ["property_name"],
+    },
+}
+
+
 async def cancel_booking(user_id: str, property_name: str, **kwargs) -> str:
     prop = _find_property(user_id, property_name)
     if not prop:

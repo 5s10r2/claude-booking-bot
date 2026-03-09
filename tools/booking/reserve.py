@@ -4,6 +4,33 @@ from config import settings
 from utils.properties import find_property as _find_property
 
 
+CHECK_RESERVE_BED_SCHEMA = {
+    "name": "check_reserve_bed",
+    "description": "Check if a bed is already reserved for the user at a property. Returns success: true if reserved, false if not.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+        },
+        "required": ["property_name"],
+    },
+}
+
+RESERVE_BED_SCHEMA = {
+    "name": "reserve_bed",
+    "description": "Reserve a bed/room at a property. ONLY call after KYC verification and payment completion.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+        },
+        "required": ["property_name"],
+    },
+}
+
+
 async def check_reserve_bed(user_id: str, property_name: str, **kwargs) -> str:
     prop = _find_property(user_id, property_name)
     if not prop:

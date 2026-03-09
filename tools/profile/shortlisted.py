@@ -1,6 +1,18 @@
 from db.redis_store import get_shortlisted_properties as get_shortlisted, get_property_info_map
 
 
+TOOL_SCHEMA = {
+    "name": "get_shortlisted_properties",
+    "description": "Get the list of properties the user has shortlisted.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+        "required": [],
+    },
+}
+
+
 async def get_shortlisted_properties(user_id: str, **kwargs) -> str:
     shortlisted_ids = get_shortlisted(user_id)
     if not shortlisted_ids:

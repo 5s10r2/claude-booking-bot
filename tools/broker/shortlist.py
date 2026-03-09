@@ -7,6 +7,19 @@ from utils.properties import find_property
 
 logger = get_logger("tools.shortlist")
 
+TOOL_SCHEMA = {
+    "name": "shortlist_property",
+    "description": "Add a property to the user's shortlist for later reference.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact name of the property to shortlist"},
+        },
+        "required": ["property_name"],
+    },
+}
+
 
 async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
     prop = find_property(user_id, property_name)

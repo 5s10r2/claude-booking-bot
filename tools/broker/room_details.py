@@ -4,6 +4,20 @@ from config import settings
 from utils.properties import find_property
 
 
+TOOL_SCHEMA = {
+    "name": "fetch_room_details",
+    "description": "Get REAL-TIME bed availability per room (beds_available count, sharing type, per-room amenities). Uses a different API endpoint from fetch_property_details. Call alongside fetch_property_details for a complete room picture. Falls back to search cache data (sharing types, amenities, rent) if live availability is empty.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "property_name": {"type": "string", "description": "Exact property name"},
+        },
+        "required": ["property_name"],
+    },
+}
+
+
 async def _fetch_rooms_raw(eazypg_id: str) -> list:
     """Fetch raw room list from API. Used by compare_properties.
 

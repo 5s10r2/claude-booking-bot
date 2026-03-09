@@ -4,6 +4,33 @@ from db.redis_store import save_preferences as redis_save_preferences, get_prefe
 
 logger = logging.getLogger("tools.broker.preferences")
 
+TOOL_SCHEMA = {
+    "name": "save_preferences",
+    "description": "Save or update user's property search preferences. Call this before searching to store location, budget, property type, and other filters.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "location": {"type": "string", "description": "Area/locality AND city, e.g. 'Koramangala, Bangalore'"},
+            "city": {"type": "string", "description": "City name, e.g. 'Bangalore'"},
+            "min_budget": {"type": "number", "description": "Minimum monthly rent budget"},
+            "max_budget": {"type": "number", "description": "Maximum monthly rent budget"},
+            "move_in_date": {"type": "string", "description": "Preferred move-in date, pass as user stated it"},
+            "property_type": {"type": "string", "description": "One of: PG Rooms, Co-Living, Hostel, or null for flats"},
+            "unit_types_available": {"type": "string", "description": "Comma-separated: ROOM, 1RK, 1BHK, 2BHK, 3BHK, 4BHK, 5BHK"},
+            "pg_available_for": {"type": "string", "description": "All Girls, All Boys, or Any"},
+            "sharing_types_enabled": {"type": "string", "description": "Room sharing count: 1 for single, 2 for double, etc."},
+            "amenities": {"type": "string", "description": "Comma-separated amenities: gym, wifi, parking, kitchen, etc. For backward compatibility, always pass the full combined list here."},
+            "must_have_amenities": {"type": "string", "description": "Comma-separated amenities the user MUST have (said 'need', 'require', 'must have'). E.g. 'AC, WiFi'"},
+            "nice_to_have_amenities": {"type": "string", "description": "Comma-separated amenities the user would PREFER but aren't essential (said 'prefer', 'nice to have', 'if possible'). E.g. 'gym, parking'"},
+            "deal_breakers": {"type": "string", "description": "Comma-separated deal-breakers inferred from user rejecting 2+ properties for the same reason. E.g. 'no AC, far from metro'. Only set when a clear pattern emerges from rejections."},
+            "description": {"type": "string", "description": "User's free-text description of what they want"},
+            "commute_from": {"type": "string", "description": "User's commute reference point — office, college, or any landmark they want properties near. E.g. 'Reliance Corporate Park, Navi Mumbai'"},
+        },
+        "required": ["location"],
+    },
+}
+
 
 def save_preferences(
     user_id: str,

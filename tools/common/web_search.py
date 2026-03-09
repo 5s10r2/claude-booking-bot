@@ -62,6 +62,32 @@ _COMPETITOR_NAMES = {
 }
 
 
+TOOL_SCHEMA = {
+    "name": "web_search",
+    "description": "Search the web for real-time market data, area intelligence, brand info, or general knowledge. Use for: rent ranges, neighborhood safety, connectivity, brand reviews, or any factual question tools can't answer. Cached results are returned instantly. Max 3 searches per conversation.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query. Be specific: 'average rent for PG in Andheri West Mumbai 2024' is better than 'rent Andheri'",
+            },
+            "category": {
+                "type": "string",
+                "description": "One of: 'area' (neighborhood data, rent ranges, connectivity), 'brand' (reviews, reputation), 'general' (anything else)",
+                "enum": ["area", "brand", "general"],
+            },
+            "context": {
+                "type": "string",
+                "description": "Brief context for why you need this search (helps with result relevance)",
+            },
+        },
+        "required": ["query", "category"],
+    },
+}
+
+
 def _cache_key(category: str, query: str) -> str:
     cfg = _CATEGORY_CONFIG.get(category, _CATEGORY_CONFIG["general"])
     h = hashlib.md5(query.lower().strip().encode()).hexdigest()
