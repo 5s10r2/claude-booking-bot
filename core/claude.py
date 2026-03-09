@@ -29,6 +29,7 @@ class AnthropicEngine:
         model: str,
         user_id: str,
         max_iterations: int = None,
+        agent_name: str = "unknown",
     ) -> str:
         if max_iterations is None:
             max_iterations = settings.MAX_AGENT_ITERATIONS
@@ -50,6 +51,26 @@ class AnthropicEngine:
             logger.debug("iteration %d/%d | stop_reason=%s", iteration + 1, max_iterations, response.stop_reason)
 
             if response.stop_reason == "end_turn":
+                # Fire-and-forget cost tracking (non-blocking) — mirrors streaming path
+                try:
+                    from db.redis_store import increment_session_cost
+                    from db.redis.analytics import increment_agent_cost, increment_daily_cost
+                    usage = response.usage
+                    asyncio.create_task(asyncio.to_thread(
+                        increment_session_cost, user_id,
+                        usage.input_tokens, usage.output_tokens, model,
+                    ))
+                    rates = getattr(settings, "COST_PER_MTK", {}).get(model, {"in": 0.0, "out": 0.0})
+                    turn_cost = (usage.input_tokens * rates["in"] + usage.output_tokens * rates["out"]) / 1_000_000
+                    asyncio.create_task(asyncio.to_thread(
+                        increment_agent_cost, agent_name,
+                        usage.input_tokens, usage.output_tokens, turn_cost,
+                    ))
+                    asyncio.create_task(asyncio.to_thread(
+                        increment_daily_cost, turn_cost,
+                    ))
+                except Exception:
+                    pass  # intentional: metrics are best-effort
                 return self._extract_text(response)
 
             if response.stop_reason == "tool_use":
@@ -101,6 +122,7 @@ class AnthropicEngine:
         user_id: str,
         tool_executor: ToolExecutor | None = None,
         max_iterations: int | None = None,
+        agent_name: str = "unknown",
     ) -> AsyncGenerator[dict, None]:
         """Streaming version of run_agent. Yields dicts like
         {"event": "content_delta", "data": {"text": "…"}} that the
@@ -185,10 +207,22 @@ class AnthropicEngine:
                 # Fire-and-forget cost tracking (non-blocking)
                 try:
                     from db.redis_store import increment_session_cost
+                    from db.redis.analytics import increment_agent_cost, increment_daily_cost
                     usage = response.usage
+                    # Per-user rolling session cost (7-day TTL)
                     asyncio.create_task(asyncio.to_thread(
                         increment_session_cost, user_id,
                         usage.input_tokens, usage.output_tokens, model,
+                    ))
+                    # Per-agent + daily totals (90-day TTL, powers command-center)
+                    rates = getattr(settings, "COST_PER_MTK", {}).get(model, {"in": 0.0, "out": 0.0})
+                    turn_cost = (usage.input_tokens * rates["in"] + usage.output_tokens * rates["out"]) / 1_000_000
+                    asyncio.create_task(asyncio.to_thread(
+                        increment_agent_cost, agent_name,
+                        usage.input_tokens, usage.output_tokens, turn_cost,
+                    ))
+                    asyncio.create_task(asyncio.to_thread(
+                        increment_daily_cost, turn_cost,
                     ))
                 except Exception:
                     pass  # intentional: metrics are best-effort

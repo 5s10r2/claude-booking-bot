@@ -59,6 +59,8 @@ from db.redis_store import (
     save_conversation,
     set_brand_config,
     set_human_mode,
+    get_agent_costs,
+    get_daily_cost,
 )
 
 logger = get_logger("routers.admin")
@@ -339,10 +341,13 @@ async def admin_command_center():
             "visits_scheduled": day_funnel.get("visit_scheduled", 0),
             "booked":           day_funnel.get("booked", 0),
         },
-        "funnel": day_funnel,
-        "agents": day_agents,
+        "funnel":               day_funnel,
+        "agents":               day_agents,
         "active_conversations": get_active_users_count(),
         "human_mode_count":     human_count,
+        # Cost fields — consumed by admin portal AnalyticsPage AgentCostTable + KPI card
+        "cost_usd_today":       get_daily_cost(today),
+        "agents_cost":          get_agent_costs(today),
         "generated_at":         datetime.utcnow().isoformat(),
     }
 

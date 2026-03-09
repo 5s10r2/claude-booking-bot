@@ -129,6 +129,76 @@ def get_funnel(day: str = None) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Per-agent cost tracking (streaming path — fire-and-forget)
+# ---------------------------------------------------------------------------
+
+def increment_agent_cost(agent_name: str, tokens_in: int, tokens_out: int, cost_usd: float) -> None:
+    """Accumulate per-agent token usage + cost for today. 90-day TTL.
+
+    Writes to hash  agent_cost:{YYYY-MM-DD}
+    Fields:         {agent}:tokens_in, {agent}:tokens_out, {agent}:cost_usd
+    Read by:        get_agent_costs()  ← used in /admin/command-center
+    """
+    day = date.today().isoformat()
+    key = f"agent_cost:{day}"
+    pipe = _r().pipeline(transaction=False)
+    pipe.hincrbyfloat(key, f"{agent_name}:tokens_in", tokens_in)
+    pipe.hincrbyfloat(key, f"{agent_name}:tokens_out", tokens_out)
+    pipe.hincrbyfloat(key, f"{agent_name}:cost_usd", cost_usd)
+    pipe.expire(key, ANALYTICS_TTL)
+    pipe.execute()
+
+
+def get_agent_costs(day: str = None) -> dict[str, dict]:
+    """Return {agent: {tokens_in, tokens_out, cost_usd}} for a given day (default: today).
+
+    Returns empty dict if no cost data has been tracked yet for that day.
+    """
+    if day is None:
+        day = date.today().isoformat()
+    raw = _r().hgetall(f"agent_cost:{day}")
+    if not raw:
+        return {}
+    result: dict[str, dict] = {}
+    for k, v in raw.items():
+        parts = k.decode().rsplit(":", 1)
+        if len(parts) != 2:
+            continue
+        agent, field = parts
+        if agent not in result:
+            result[agent] = {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+        val = float(v)
+        if field == "tokens_in":
+            result[agent]["tokens_in"] = int(val)
+        elif field == "tokens_out":
+            result[agent]["tokens_out"] = int(val)
+        elif field == "cost_usd":
+            result[agent]["cost_usd"] = round(val, 6)
+    return result
+
+
+def increment_daily_cost(cost_usd: float) -> None:
+    """Accumulate today's total cost across all agents. 90-day TTL.
+
+    Writes to hash  daily_cost:{YYYY-MM-DD}
+    Fields:         cost_usd
+    Read by:        get_daily_cost()  ← used in /admin/command-center
+    """
+    day = date.today().isoformat()
+    key = f"daily_cost:{day}"
+    _r().hincrbyfloat(key, "cost_usd", cost_usd)
+    _r().expire(key, ANALYTICS_TTL)
+
+
+def get_daily_cost(day: str = None) -> float:
+    """Return total cost_usd for a given day (default: today). Returns 0.0 if no data."""
+    if day is None:
+        day = date.today().isoformat()
+    raw = _r().hget(f"daily_cost:{day}", "cost_usd")
+    return round(float(raw), 4) if raw else 0.0
+
+
+# ---------------------------------------------------------------------------
 # WhatsApp message response tracking (dedup)
 # ---------------------------------------------------------------------------
 

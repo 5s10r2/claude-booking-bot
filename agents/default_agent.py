@@ -56,6 +56,7 @@ async def run(
             messages=messages,
             model=cfg["model"],
             user_id=user_id,
+            agent_name="default",
         )
     finally:
         engine.tool_executor = original_executor

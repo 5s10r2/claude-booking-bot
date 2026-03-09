@@ -53,6 +53,7 @@ async def run(
             messages=messages,
             model=cfg["model"],
             user_id=user_id,
+            agent_name="booking",
         )
     finally:
         engine.tool_executor = original_executor

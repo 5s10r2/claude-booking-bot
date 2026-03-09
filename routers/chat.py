@@ -195,6 +195,7 @@ async def chat_stream(req: ChatRequest):
                 model=cfg["model"],
                 user_id=req.user_id,
                 tool_executor=cfg["executor"],
+                agent_name=agent_name,
             ):
                 yield f"event: {ev['event']}\ndata: {json.dumps(ev['data'])}\n\n"
                 if ev["event"] == "content_delta":
