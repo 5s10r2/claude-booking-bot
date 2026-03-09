@@ -1,8 +1,8 @@
-import httpx
-
 from config import settings
+from db.redis_store import get_user_phone
 from utils.date import transcribe_date
 from utils.properties import find_property as _find_property
+from utils.retry import http_post
 
 
 TOOL_SCHEMA = {
@@ -30,6 +30,10 @@ async def save_call_time(
     visit_type: str = "Phone Call",
     **kwargs,
 ) -> str:
+    # Phone gate — must have phone before scheduling a call
+    if not get_user_phone(user_id):
+        return "I need your phone number before I can schedule a call. Please share your mobile number (e.g., 9876543210)."
+
     prop = _find_property(user_id, property_name)
     if not prop:
         return f"Property '{property_name}' not found. Please provide the correct property name."
@@ -43,22 +47,22 @@ async def save_call_time(
         return "I couldn't understand that date. Please say something like 'tomorrow', '15 March', or '25/03/2026'."
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"{settings.RENTOK_API_BASE_URL}/bookingBot/add-booking",
-                json={
-                    "user_id": user_id,
-                    "property_id": property_id,
-                    "visit_date": visit_date,
-                    "visit_time": visit_time,
-                    "visit_type": visit_type,
-                    "property_name": prop.get("property_name", property_name),
-                },
-            )
-            if resp.status_code == 400:
-                return "There is already a scheduled booking for this property or on the same date. Would you like to see your scheduled events?"
-            resp.raise_for_status()
-            data = resp.json()
+        resp = await http_post(
+            f"{settings.RENTOK_API_BASE_URL}/bookingBot/add-booking",
+            json={
+                "user_id": user_id,
+                "property_id": property_id,
+                "visit_date": visit_date,
+                "visit_time": visit_time,
+                "visit_type": visit_type,
+                "property_name": prop.get("property_name", property_name),
+            },
+            raw=True,
+        )
+        if resp.status_code == 400:
+            return "There is already a scheduled booking for this property or on the same date. Would you like to see your scheduled events?"
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as e:
         return f"Error scheduling {visit_type.lower()}: {str(e)}"
 

@@ -2,7 +2,7 @@ import httpx
 
 from config import settings
 from core.log import get_logger
-from db.redis_store import get_property_info_map, get_account_values, track_funnel, get_user_phone, get_aadhar_user_name, record_visit_scheduled, schedule_followup
+from db.redis_store import get_property_info_map, get_account_values, track_funnel, get_user_phone, get_aadhar_user_name, get_user_memory, record_visit_scheduled, schedule_followup
 from utils.date import transcribe_date
 from utils.properties import find_property as _find_property
 from utils.retry import http_post
@@ -34,6 +34,10 @@ async def save_visit_time(
     visit_type: str = "Physical visit",
     **kwargs,
 ) -> str:
+    # Phone gate — must have phone before scheduling a visit
+    if not get_user_phone(user_id):
+        return "I need your phone number before I can schedule a visit. Please share your mobile number (e.g., 9876543210)."
+
     prop = _find_property(user_id, property_name)
     if not prop:
         return f"Property '{property_name}' not found. Please provide the correct property name."
@@ -133,7 +137,10 @@ async def _create_external_lead(
     from datetime import datetime
 
     phone = get_user_phone(user_id) or ""
-    name = get_aadhar_user_name(user_id) or phone or "Guest"
+    name = get_aadhar_user_name(user_id)
+    if not name:
+        mem = get_user_memory(user_id) or {}
+        name = mem.get("profile_name") or mem.get("name") or phone or "Guest"
 
     payload = {
         "eazypg_id": eazypg_id,

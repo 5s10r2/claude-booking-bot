@@ -38,4 +38,7 @@ async def cancel_booking(user_id: str, property_name: str, **kwargs) -> str:
     except Exception as e:
         return f"Error cancelling booking: {str(e)}"
 
-    return f"Booking cancelled for '{prop.get('property_name', property_name)}'."
+    if not data.get("success"):
+        msg = data.get("message", "unknown error")
+        return f"Cancellation failed: {msg}. Please try again or contact support."
+    return f"Booking cancelled successfully for '{prop.get('property_name', property_name)}'."

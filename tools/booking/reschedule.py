@@ -64,6 +64,10 @@ async def reschedule_booking(
     except Exception as e:
         return f"Error rescheduling booking: {str(e)}"
 
+    if not data.get("success"):
+        msg = data.get("message", "unknown error")
+        return f"Rescheduling failed: {msg}. Please try again."
+
     parts = []
     if visit_date:
         parts.append(f"date: {update_data['visit_date']}")
@@ -73,4 +77,4 @@ async def reschedule_booking(
         parts.append(f"type: {visit_type}")
 
     changes = ", ".join(parts) if parts else "details updated"
-    return f"Booking rescheduled for '{prop.get('property_name', property_name)}' — {changes}."
+    return f"Booking rescheduled successfully for '{prop.get('property_name', property_name)}' — {changes}."
