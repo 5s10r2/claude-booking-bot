@@ -222,6 +222,7 @@ async def admin_conversations(offset: int = 0, limit: int = 50):
                 last_role = msg.get("role", "")
                 break
 
+        cost_data = get_session_cost(uid)
         rows.append({
             "uid": uid,
             "name": mem.get("profile_name") or mem.get("name") or "",
@@ -234,6 +235,7 @@ async def admin_conversations(offset: int = 0, limit: int = 50):
             "last_seen": mem.get("last_seen", ""),
             "human_mode": human_mode,
             "message_count": len(conv),
+            "cost_usd": cost_data.get("cost_usd", 0.0),
         })
 
     return {
