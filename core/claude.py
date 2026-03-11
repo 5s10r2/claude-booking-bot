@@ -43,6 +43,9 @@ class AnthropicEngine:
                 t["cache_control"] = {"type": "ephemeral"}
             cached_tools.append(t)
 
+        # Fix P11: merge consecutive same-role messages before sending to Anthropic
+        messages = self._sanitize_messages(messages)
+
         for iteration in range(max_iterations):
             response = await self._call_api(model, system, cached_tools, messages)
             if response is None:
@@ -141,6 +144,9 @@ class AnthropicEngine:
             if i == len(tools) - 1:
                 t["cache_control"] = {"type": "ephemeral"}
             cached_tools.append(t)
+
+        # Fix P11: merge consecutive same-role messages before sending to Anthropic
+        messages = self._sanitize_messages(messages)
 
         for iteration in range(max_iterations):
             logger.debug("stream iteration %d/%d", iteration + 1, max_iterations)
@@ -379,6 +385,48 @@ class AnthropicEngine:
             if match:
                 text = match.group(0)
         return text
+
+    @staticmethod
+    def _sanitize_messages(messages: list[dict]) -> list[dict]:
+        """Merge consecutive same-role messages to comply with Anthropic's alternating role requirement.
+
+        Handles two real-world cases:
+        - Consecutive assistant messages: admin message injected after AI response (human takeover)
+        - Consecutive user messages: user messages accumulated during human_mode bypass in pipeline
+
+        Content merging rules:
+        - str + str → concatenate with double newline
+        - list + str → append text block to list
+        - str + list → prepend text block to list
+        - list + list → concatenate lists (handles tool_result blocks)
+        """
+        if not messages:
+            return messages
+
+        sanitized: list[dict] = []
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+
+            if sanitized and sanitized[-1]["role"] == role:
+                # Merge consecutive same-role messages
+                prev = sanitized[-1]
+                prev_content = prev["content"]
+                if isinstance(prev_content, str) and isinstance(content, str):
+                    prev["content"] = prev_content + "\n\n" + content
+                elif isinstance(prev_content, list) and isinstance(content, str):
+                    prev["content"] = prev_content + [{"type": "text", "text": content}]
+                elif isinstance(prev_content, str) and isinstance(content, list):
+                    prev["content"] = [{"type": "text", "text": prev_content}] + content
+                elif isinstance(prev_content, list) and isinstance(content, list):
+                    prev["content"] = prev_content + content
+                else:
+                    prev["content"] = str(prev_content) + "\n\n" + str(content)
+                logger.debug("sanitize_messages: merged consecutive %s messages", role)
+            else:
+                sanitized.append({k: v for k, v in msg.items()})
+
+        return sanitized
 
     @staticmethod
     def _serialize_content(content) -> list[dict]:
