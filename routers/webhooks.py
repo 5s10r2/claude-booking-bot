@@ -8,6 +8,8 @@ Routes:
   POST /cron/follow-ups   — Proactive follow-up processing
 """
 
+import asyncio
+
 import core.state as state
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -37,11 +39,108 @@ from db.redis_store import (
     get_user_memory,
     get_conversation,
     save_conversation,
+    # wamid dedup + queue
+    set_wamid_seen,
+    is_wamid_seen,
+    wa_queue_push,
+    wa_queue_drain,
+    wa_queue_len,
+    wa_processing_acquire,
+    wa_processing_release,
+    # pipeline cancellation (Phase C)
+    set_cancel_requested,
 )
 
 logger = get_logger("routers.webhooks")
 
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp async drain-and-process (debounce + queue accumulation)
+# ---------------------------------------------------------------------------
+
+async def _drain_and_process(user_phone: str) -> None:
+    """Drain the per-user WhatsApp message queue after a debounce window.
+
+    This coroutine is launched via asyncio.create_task() once per user when
+    their first queued message arrives.  It:
+
+      1. Waits WA_DEBOUNCE_SECONDS for any rapid follow-ups to land.
+      2. Drains all pending messages from {user_phone}:wa_queue.
+      3. Merges them into a single user turn (newline-joined).
+      4. Runs the AI pipeline.
+      5. Sends the response (+ carousel/images if any).
+      6. If new messages arrived during processing (Phase C): sets cancel signal
+         so any still-running pipeline iteration exits at its next checkpoint,
+         then loops to drain the new arrivals.
+      7. Releases the per-user processing lock.
+
+    The caller must already hold the wa_processing lock before creating this task.
+    """
+    try:
+        while True:
+            # Debounce: let the user finish typing before we process
+            await asyncio.sleep(settings.WA_DEBOUNCE_SECONDS)
+
+            # Drain everything currently in the queue
+            messages = wa_queue_drain(user_phone)
+            if not messages:
+                # Queue was empty (race condition or already drained) — done
+                break
+
+            # Merge rapid-fire messages into one coherent user intent
+            combined = "\n".join(messages) if len(messages) > 1 else messages[0]
+            logger.info(
+                "WhatsApp drain: user=%s count=%d text=%r",
+                user_phone, len(messages), combined[:100],
+            )
+
+            # Run the AI pipeline with the merged intent
+            try:
+                response, agent_name, _lang = await run_pipeline(user_phone, combined)
+            except Exception as e:
+                logger.error("Pipeline error in drain for %s: %s", user_phone, e)
+                response = "I'm sorry, I'm having trouble right now. Please try again."
+                agent_name = "error"
+
+            # Human mode — admin is responding manually; skip all outbound sends
+            if agent_name == "human":
+                pass
+            # No-message flag — pipeline chose not to respond
+            elif get_no_message(user_phone) == "1":
+                clear_no_message(user_phone)
+            else:
+                # Send primary response
+                await send_text(user_phone, response)
+
+                # Send property carousel if pipeline generated one
+                template = get_property_template(user_phone)
+                if template:
+                    await send_carousel(user_phone, template)
+
+                # Send property images if pipeline generated any
+                images = get_property_images_id(user_phone)
+                if images:
+                    await send_images(user_phone, images)
+
+            # If new messages arrived while we were processing, loop and drain again.
+            # Set the cancellation signal BEFORE the next pipeline run so that the
+            # previous run (if still mid-tool-call via Phase C checkpoint) exits cleanly.
+            if wa_queue_len(user_phone) == 0:
+                break
+            logger.info(
+                "WhatsApp drain: new messages arrived for %s during processing, looping",
+                user_phone,
+            )
+            # Phase C: signal any in-flight pipeline iteration to abort at its next checkpoint
+            set_cancel_requested(user_phone)
+
+    except Exception as e:
+        logger.error("Unexpected error in _drain_and_process for %s: %s", user_phone, e)
+    finally:
+        # Always release the processing lock so the next message can start a new drain
+        wa_processing_release(user_phone)
 
 
 # ---------------------------------------------------------------------------
@@ -112,11 +211,13 @@ async def whatsapp_webhook(request: Request):
         logger.warning("WhatsApp rate limited: user=%s tier=%s", user_phone, e.tier)
         return JSONResponse({"status": "rate_limited", "retry_after": e.retry_after})
 
-    # Dedup: skip if same message within 30s
-    active = get_active_request(user_phone)
-    if active == text:
+    # ── Dedup by wamid (Meta's unique per-message ID) ──────────────────────────
+    # This correctly deduplicates Meta's legitimate duplicate-delivery retries
+    # (same wamid = same physical message) without blocking genuine follow-ups
+    # that happen to contain the same text as a previous message.
+    if not wamid or is_wamid_seen(wamid):
         return JSONResponse({"status": "duplicate"})
-    set_active_request(user_phone, text)
+    set_wamid_seen(wamid)
 
     # Store contact name
     if contacts:
@@ -129,7 +230,7 @@ async def whatsapp_webhook(request: Request):
     if pg_ids:
         set_whitelabel_pg_ids(user_phone, pg_ids.split(","))
 
-    # Persist incoming message
+    # Persist incoming message immediately (before any queuing)
     pg_ids_val = request.query_params.get("pg_ids", "")
     await pg.insert_message(
         thread_id=user_phone,
@@ -158,39 +259,19 @@ async def whatsapp_webhook(request: Request):
             # Write with 1-hour TTL so stale creds don't linger
             _json_set(f"{user_phone}:account_values", hydrated, ex=3600)
 
-    # Run pipeline
-    try:
-        response, agent_name, _lang = await run_pipeline(user_phone, text)
-    except Exception as e:
-        logger.error("Pipeline error for %s: %s", user_phone, e)
-        response = "I'm sorry, I'm having trouble right now. Please try again."
-        agent_name = "error"
+    # ── Queue + debounce ────────────────────────────────────────────────────
+    # Push message text onto the per-user Redis queue.
+    # If no drain task is already running for this user, start one.
+    # The drain task waits WA_DEBOUNCE_SECONDS, then merges all queued
+    # messages into one AI turn — so rapid-fire "Boys PG" + "under 10k"
+    # become a single coherent intent.
+    wa_queue_push(user_phone, text)
+    if wa_processing_acquire(user_phone):
+        # Lock acquired — we are the first; fire-and-forget the drain coroutine
+        asyncio.create_task(_drain_and_process(user_phone))
 
-    delete_active_request(user_phone)
-
-    # Human mode — pipeline saved the user message; admin is responding manually, skip all outbound sends
-    if agent_name == "human":
-        return JSONResponse({"status": "ok", "agent": "human", "human_mode": True})
-
-    # Check if we should skip sending (no_message flag)
-    if get_no_message(user_phone) == "1":
-        clear_no_message(user_phone)
-        return JSONResponse({"status": "ok", "agent": agent_name, "no_message": True})
-
-    # Send response via WhatsApp
-    await send_text(user_phone, response)
-
-    # Send property carousel if available
-    template = get_property_template(user_phone)
-    if template:
-        await send_carousel(user_phone, template)
-
-    # Send property images if available
-    images = get_property_images_id(user_phone)
-    if images:
-        await send_images(user_phone, images)
-
-    return JSONResponse({"status": "ok", "agent": agent_name})
+    # Return 200 immediately — pipeline runs asynchronously in the drain task
+    return JSONResponse({"status": "ok", "queued": True})
 
 
 # ---------------------------------------------------------------------------

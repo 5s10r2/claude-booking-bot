@@ -106,6 +106,21 @@ class AnthropicEngine:
                     })
 
                 messages.append({"role": "user", "content": tool_results})
+
+                # Phase C cancellation checkpoint — checked between tool-call iterations
+                # so a new incoming WhatsApp message can interrupt a long-running tool chain.
+                try:
+                    from db.redis_store import is_cancel_requested, clear_cancel_requested
+                    if is_cancel_requested(user_id):
+                        clear_cancel_requested(user_id)
+                        logger.info(
+                            "run_agent cancelled at iteration %d by new message, user=%s",
+                            iteration + 1, user_id,
+                        )
+                        return ""  # empty return — drain task will process the new message
+                except Exception:
+                    pass  # intentional: cancellation check is best-effort
+
                 continue
 
             return self._extract_text(response)
@@ -267,6 +282,22 @@ class AnthropicEngine:
                 yield {"event": "content_delta", "data": {"text": "\n\n"}}
 
                 messages.append({"role": "user", "content": tool_results})
+
+                # Phase C cancellation checkpoint — streaming path
+                # If the user interrupted (web AbortController), we can stop here so
+                # the partial text already streamed stands as-is.
+                try:
+                    from db.redis_store import is_cancel_requested, clear_cancel_requested
+                    if is_cancel_requested(user_id):
+                        clear_cancel_requested(user_id)
+                        logger.info(
+                            "run_agent_stream cancelled at iteration %d by interrupt, user=%s",
+                            iteration + 1, user_id,
+                        )
+                        return  # caller handles partial text as interrupted response
+                except Exception:
+                    pass  # intentional: cancellation check is best-effort
+
                 continue
 
             # Unexpected stop reason — text was already streamed

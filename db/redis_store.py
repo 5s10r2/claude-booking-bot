@@ -37,6 +37,19 @@ from db.redis import (  # noqa: F401
     clear_account_values,
     set_whitelabel_pg_ids,
     get_whitelabel_pg_ids,
+    # wamid-based dedup
+    set_wamid_seen,
+    is_wamid_seen,
+    # WhatsApp per-user queue
+    wa_queue_push,
+    wa_queue_drain,
+    wa_queue_len,
+    wa_processing_acquire,
+    wa_processing_release,
+    # Pipeline cancellation signal (Phase C)
+    set_cancel_requested,
+    clear_cancel_requested,
+    is_cancel_requested,
     # User domain
     save_preferences,
     get_preferences,

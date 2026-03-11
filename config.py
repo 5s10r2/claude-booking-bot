@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     RATE_LIMIT_USER_PER_HOUR: int = 30        # max messages per user per hour
     RATE_LIMIT_GLOBAL_PER_MINUTE: int = 100   # max messages across all users per minute
 
+    # WhatsApp message queuing + dedup
+    WA_DEBOUNCE_SECONDS: float = 2.0   # wait this long after last message before processing batch
+    WAMID_DEDUP_TTL: int = 86400       # 24h — covers Meta's duplicate delivery retry window
+    WA_QUEUE_TTL: int = 300            # 5 min — pending message queue expiry safety net
+    WA_PROCESSING_TTL: int = 120       # 2 min — per-user processing lock safety TTL
+
     model_config = {"env_file": ".env", "extra": "ignore", "env_ignore_empty": True}
 
 

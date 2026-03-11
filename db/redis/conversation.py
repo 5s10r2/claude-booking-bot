@@ -3,7 +3,10 @@ db/redis/conversation.py — Conversation history, session routing, and account 
 
 Covers:
   - Conversation history (get/save/clear)
-  - Active request dedup
+  - Active request dedup (legacy text-based)
+  - wamid dedup (wamid-based, for WhatsApp)
+  - Per-user WhatsApp message queue (debounce + merge)
+  - Pipeline cancellation signal (Phase C)
   - Last agent tracking
   - Account values + whitelabel PG IDs
 """
@@ -103,3 +106,100 @@ def set_whitelabel_pg_ids(user_id: str, pg_ids: list) -> None:
 
 def get_whitelabel_pg_ids(user_id: str) -> list[str]:
     return _json_get(f"{user_id}:pg_ids", default=[])
+
+
+# ---------------------------------------------------------------------------
+# wamid-based dedup (replaces text-content dedup for WhatsApp)
+# ---------------------------------------------------------------------------
+# Meta's unique message ID (wamid) is stable across duplicate delivery retries.
+# TTL of 24h covers the longest known Meta retry window.
+
+def set_wamid_seen(wamid: str, ttl: Optional[int] = None) -> None:
+    """Mark a WhatsApp message ID as seen to prevent duplicate processing."""
+    from config import settings
+    _r().set(f"wamid:{wamid}", "1", ex=ttl or settings.WAMID_DEDUP_TTL)
+
+
+def is_wamid_seen(wamid: str) -> bool:
+    """Return True if this wamid has already been processed."""
+    return bool(_r().exists(f"wamid:{wamid}"))
+
+
+# ---------------------------------------------------------------------------
+# Per-user WhatsApp message queue (for debounce + accumulation)
+# ---------------------------------------------------------------------------
+# Pattern: rapid-fire messages from same user accumulate in a Redis List.
+# A single async drain task processes the full batch after a debounce window.
+
+def wa_queue_push(user_id: str, message: str, ttl: Optional[int] = None) -> None:
+    """Append a message text to the user's pending WhatsApp queue."""
+    from config import settings
+    key = f"{user_id}:wa_queue"
+    _r().rpush(key, message)
+    _r().expire(key, ttl or settings.WA_QUEUE_TTL)
+
+
+def wa_queue_drain(user_id: str) -> list[str]:
+    """Atomically drain all pending messages from the user's WhatsApp queue.
+
+    Returns a list of message strings (may be empty if queue was already drained).
+    """
+    key = f"{user_id}:wa_queue"
+    messages: list[str] = []
+    while True:
+        raw = _r().lpop(key)
+        if raw is None:
+            break
+        messages.append(raw.decode() if isinstance(raw, bytes) else raw)
+    return messages
+
+
+def wa_queue_len(user_id: str) -> int:
+    """Return the number of messages currently waiting in the user's queue."""
+    return int(_r().llen(f"{user_id}:wa_queue") or 0)
+
+
+def wa_processing_acquire(user_id: str, ttl: Optional[int] = None) -> bool:
+    """Acquire the per-user processing lock using SET NX (atomic).
+
+    Returns True if the lock was acquired (this caller should start draining).
+    Returns False if another coroutine already holds the lock.
+    """
+    from config import settings
+    result = _r().set(
+        f"{user_id}:wa_processing", "1",
+        ex=ttl or settings.WA_PROCESSING_TTL,
+        nx=True,
+    )
+    return result is not None  # SET NX returns None if key already exists
+
+
+def wa_processing_release(user_id: str) -> None:
+    """Release the per-user processing lock."""
+    _r().delete(f"{user_id}:wa_processing")
+
+
+# ---------------------------------------------------------------------------
+# Pipeline cancellation signal (Phase C — WhatsApp mid-flight interrupt)
+# ---------------------------------------------------------------------------
+# When a new batch of messages arrives while a pipeline run is still executing
+# tool calls, the drain task sets this flag before starting the next run.
+# The pipeline checks it between tool-call iterations — if set, the old run
+# exits cleanly at the next natural boundary, allowing the new run to proceed.
+
+CANCEL_REQUESTED_TTL = 30  # seconds — short-lived, only needed within one turn
+
+
+def set_cancel_requested(user_id: str) -> None:
+    """Signal that the current pipeline run for this user should cancel."""
+    _r().set(f"{user_id}:cancel_requested", "1", ex=CANCEL_REQUESTED_TTL)
+
+
+def clear_cancel_requested(user_id: str) -> None:
+    """Clear the cancellation signal (called by pipeline after acting on it)."""
+    _r().delete(f"{user_id}:cancel_requested")
+
+
+def is_cancel_requested(user_id: str) -> bool:
+    """Return True if a cancellation was requested for this user's pipeline."""
+    return bool(_r().exists(f"{user_id}:cancel_requested"))
