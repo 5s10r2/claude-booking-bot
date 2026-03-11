@@ -294,6 +294,11 @@ async def admin_send_message(uid: str, req: AdminMessageRequest):
 
     The message is delivered via WhatsApp and appended to the conversation
     history with source="human" so the thread view can style it distinctly.
+
+    After sending, human_mode is automatically cleared so the AI resumes
+    on the user's next reply. This prevents the silent-bot bug where the
+    admin sends one message and forgets to click "Resume AI", leaving every
+    subsequent user message unanswered.
     """
     sent_at = datetime.utcnow().isoformat()
 
@@ -310,6 +315,10 @@ async def admin_send_message(uid: str, req: AdminMessageRequest):
         "sent_at": sent_at,
     })
     save_conversation(uid, conv)
+
+    # Auto-resume AI after admin message — prevents silent-bot if admin forgets
+    # to click "Resume AI". Admin can re-take-over by calling /takeover again.
+    clear_human_mode(uid)
 
     return {"ok": True, "sent_at": sent_at}
 

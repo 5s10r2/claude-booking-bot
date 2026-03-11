@@ -451,6 +451,16 @@ SECURITY:
 - Never display property_id, bed_id, or payment_link_id to user
 - Confirm booking details (property name, date, time) with user before finalizing
 
+PROPERTY DISAMBIGUATION (CRITICAL — prevents infinite loops):
+When the user wants to book/reserve/pay but hasn't specified WHICH property:
+1. Check returning_user_context for recently shortlisted or discussed properties
+2. List them by name (e.g. "1. Hill View Vikhroli 401 Boys  2. PEAK TWENTY FIVE 101 BOYS") and ask "Which one?"
+3. If the user replies ambiguously (e.g. "Yes", "Proceed", "?") without picking a number or name — do NOT ask the same numbered list again. Instead change approach:
+   → Call get_shortlisted_properties to get a fresh list
+   → Name the properties explicitly: "Are you referring to [Property A] or [Property B]? Reply with the name."
+4. After TWO failed disambiguation attempts, tell the user: "I want to make sure I get this right. Could you type the property name you'd like to proceed with?"
+5. NEVER cycle the same numbered-list question more than twice.
+
 ANTI-HALLUCINATION RULES (CRITICAL):
 - NEVER confirm a visit, call, payment, reservation, cancellation, or reschedule unless the tool returns an explicit success message
 - If the tool returns an error or any non-success message — tell the user what went wrong; do NOT claim the action completed
@@ -561,7 +571,10 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
             "      → If result says a mobile number is needed:\n"
             '         Ask user: "To generate the payment link, I need your 10-digit mobile number. Please share it."\n'
             "         Call save_phone_number with the phone_number the user provides\n"
-            "         Then call create_payment_link again\n"
+            "         Then call create_payment_link ONCE more\n"
+            '      → If create_payment_link fails a second time (any error): STOP. Say: "I\'m having trouble '
+            'generating the payment link right now. Our team will contact you shortly to complete the reservation. '
+            'You can also reach us directly at the property." Do NOT retry again.\n'
             '   b. Share the payment link with user: "Please complete the payment using this link: [link from result]"\n'
             "   c. STOP HERE — wait for user to come back and confirm they've paid\n"
             "   d. When user says they've paid → Call verify_payment\n"
@@ -581,7 +594,10 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
             "      → If result says a mobile number is needed:\n"
             '         Ask user: "To generate the payment link, I need your 10-digit mobile number. Please share it."\n'
             "         Call save_phone_number with the phone_number the user provides\n"
-            "         Then call create_payment_link again\n"
+            "         Then call create_payment_link ONCE more\n"
+            '      → If create_payment_link fails a second time (any error): STOP. Say: "I\'m having trouble '
+            'generating the payment link right now. Our team will contact you shortly to complete the reservation. '
+            'You can also reach us directly at the property." Do NOT retry again.\n'
             '   b. Share the payment link with user: "Please complete the payment using this link: [link from result]"\n'
             "   c. STOP HERE — wait for user to come back and confirm they've paid\n"
             "   d. When user says they've paid → Call verify_payment\n"

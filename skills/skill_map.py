@@ -81,6 +81,14 @@ SKILL_KEYWORDS: dict[str, list[str]] = {
     "web_search": [
         "search the web", "search online", "what about the area",
         "tell me about the area", "is it safe", "neighborhood",
+        # Area-recommendation queries — must use web_search, not model memory
+        "which area", "what area", "areas in", "area for", "best area",
+        "good area", "areas near", "best place to stay", "places to stay",
+        "good locality", "best locality", "localities in", "which locality",
+        "good location for", "best location for", "which location",
+        "safe area", "safe locality", "well connected area",
+        "for working professionals", "for students", "for families",
+        "posh area", "affordable area", "upcoming area",
     ],
     "selling": [
         "doesn't have", "no gym", "no ac", "no wifi", "no parking", "no laundry",

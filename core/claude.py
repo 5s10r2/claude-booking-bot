@@ -256,6 +256,10 @@ class AnthropicEngine:
                         "content": str(result),
                     })
 
+                # Inject a separator so post-tool response text starts on a new line
+                # instead of being glued directly onto the pre-tool preamble text.
+                yield {"event": "content_delta", "data": {"text": "\n\n"}}
+
                 messages.append({"role": "user", "content": tool_results})
                 continue
 
