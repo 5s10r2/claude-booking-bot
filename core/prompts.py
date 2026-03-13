@@ -350,7 +350,7 @@ When showing property details or during comparison:
 - Break down rent into daily value with inclusions: "₹12,000/month with meals, WiFi, laundry = under ₹400/day for everything"
 - Compare to market: "A standalone 1BHK here would cost 25k+ without any services"
 - Highlight included services from food_amenities, services_amenities, common_amenities — frame as savings, not features
-- If token amount is low: "Just ₹[amount] to reserve — fully adjustable against rent"
+{token_value_line}
 
 DECISION FATIGUE PREVENTION:
 After showing 10+ properties (2+ batches of results):
@@ -376,7 +376,7 @@ THE VALUE MATH (do this on every property detail view):
 When fetch_property_details returns food_amenities, services_amenities, common_amenities:
 - Calculate included value: "Meals (₹5k) + laundry (₹1k) + housekeeping (₹2k) = ₹8k worth of services included. Your ₹12k rent is effectively ₹4k for the room itself"
 - Compare to standalone: "A 1BHK in this area costs ₹20k+ without any services"
-- If token_amount is low: "Just ₹[amount] to reserve — fully adjustable against rent. Zero risk"
+{token_value_line}
 
 PERSONA-AWARE SELLING:
 The returning user context above may include "Persona: professional/student/family". Use this to tailor your selling approach.
@@ -437,7 +437,7 @@ When user says "book" or wants to book, ask which option they prefer:
 1. Physical Visit — schedule in-person property visit
 2. Phone Call — schedule a call with property
 3. Video Tour — schedule a video walkthrough
-4. Reserve with Token — pay token amount to reserve bed/room
+{reserve_option}
 
 SCHEDULING A VISIT:
 1. Before calling any booking tool, ensure you have:
@@ -483,7 +483,7 @@ RESCHEDULING:
 
 POST-VISIT FEEDBACK HANDLING:
 When the conversation history shows a follow-up message asking "How was your visit?" and the user responds:
-- "1" or "Loved it" or positive → Celebrate! Say "That's great to hear!" and immediately offer to reserve/book: "Want me to help you reserve a bed at [property]? Just a small token locks it in."
+- "1" or "Loved it" or positive → Celebrate! Say "That's great to hear!" and immediately offer to reserve/book: "{post_visit_reserve_cta}"
 - "2" or "It was okay" or neutral → Acknowledge, ask what could be better: "What would make it perfect? Maybe I can find something closer to what you need." Offer to search for alternatives or schedule another visit.
 - "3" or "Not for me" or negative → Show empathy, then ask WHY (this is critical for learning):
   "No worries! Quick question — what didn't work for you? Was it the location, cleanliness, amenities, price, or something else?"
@@ -573,8 +573,11 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
     ``{language_directive}`` block so every agent prompt gets an explicit
     language instruction.
 
-    The ``{kyc_reservation_flow}`` block is injected automatically based on
-    the ``KYC_ENABLED`` feature flag in settings.
+    Feature-flag-driven template vars are injected automatically:
+    - ``{kyc_reservation_flow}`` — 4-branch booking workflow (KYC_ENABLED × PAYMENT_REQUIRED)
+    - ``{reserve_option}`` — booking menu option 4 (token vs direct)
+    - ``{token_value_line}`` — token selling point in value framing sections
+    - ``{post_visit_reserve_cta}`` — post-visit reservation CTA text
     """
     from config import settings  # local import to avoid circular dependency
 
@@ -589,8 +592,71 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
     # Inject the directive into the template
     prompt_template = prompt_template.replace("{language_directive}", directive)
 
-    # Build and inject the KYC/reservation flow block
-    if settings.KYC_ENABLED:
+    # ── Feature-flag-driven template vars ─────────────────────────────────
+
+    # {reserve_option} — booking menu option 4
+    if settings.PAYMENT_REQUIRED:
+        reserve_option = "4. Reserve with Token — pay token amount to reserve bed/room"
+    else:
+        reserve_option = "4. Reserve — reserve a bed/room directly"
+    prompt_template = prompt_template.replace("{reserve_option}", reserve_option)
+
+    # {token_value_line} — token selling point (used in broker VALUE FRAMING + selling.md)
+    if settings.PAYMENT_REQUIRED:
+        token_value_line = '- If token amount is low: "Just ₹[amount] to reserve — fully adjustable against rent"'
+    else:
+        token_value_line = ""
+    prompt_template = prompt_template.replace("{token_value_line}", token_value_line)
+
+    # {post_visit_reserve_cta} — post-visit positive feedback CTA
+    if settings.PAYMENT_REQUIRED:
+        post_visit_reserve_cta = "Want me to help you reserve a bed at [property]? Just a small token locks it in."
+    else:
+        post_visit_reserve_cta = "Want me to help you reserve a bed at [property]? I can lock it in for you right away."
+    prompt_template = prompt_template.replace("{post_visit_reserve_cta}", post_visit_reserve_cta)
+
+    # {kyc_reservation_flow} — 4-branch booking workflow
+    if not settings.PAYMENT_REQUIRED and not settings.KYC_ENABLED:
+        # Direct reservation (simplest path)
+        kyc_reservation_flow = (
+            "Step 2: RESERVATION\n"
+            "   a. Call reserve_bed with property_name\n"
+            '   b. Confirm to user: "Your bed/room at [property name] has been reserved!"\n'
+            "\n"
+            "Payment is not required. Go directly from availability check to reservation.\n"
+            "If the user asks about payment or tokens, explain that no payment is needed — "
+            "reservation is free and they can proceed directly."
+        )
+    elif not settings.PAYMENT_REQUIRED and settings.KYC_ENABLED:
+        # KYC → Reserve (no payment)
+        kyc_reservation_flow = (
+            "Step 2: Call fetch_kyc_status\n"
+            "   → If result says verified: skip to Step 4\n"
+            "   → If result says not verified: proceed to Step 3\n"
+            "\n"
+            "Step 3: KYC PROCESS\n"
+            "   a. Ask user for their 12-digit Aadhaar number\n"
+            "   b. Call initiate_kyc with the aadhar_number\n"
+            "      → If result says a mobile number is needed:\n"
+            '         Ask user: "To send the Aadhaar OTP, I need your 10-digit mobile number. Please share it."\n'
+            "         Call save_phone_number with the phone_number the user provides\n"
+            "         Then call initiate_kyc again with the same aadhar_number\n"
+            '      → If success: tell user "An OTP has been sent to your registered phone number. Please share it."\n'
+            "      → If error: ask user to double-check their Aadhaar number and try again\n"
+            "   c. STOP and wait for user to provide the OTP\n"
+            "   d. Call verify_kyc with the otp\n"
+            '      → If verified: tell user "KYC verified successfully!" and proceed to Step 4\n'
+            "      → If failed: ask user to re-enter the OTP or request a new one\n"
+            "\n"
+            "Step 4: RESERVATION\n"
+            "   a. Call reserve_bed with property_name\n"
+            '   b. Confirm to user: "Your bed/room at [property name] has been reserved!"\n'
+            "\n"
+            "NEVER skip steps. NEVER call reserve_bed without completing KYC first.\n"
+            "Payment is not required for this brand."
+        )
+    elif settings.PAYMENT_REQUIRED and settings.KYC_ENABLED:
+        # Full flow: KYC → Payment → Reserve
         kyc_reservation_flow = (
             "Step 2: Call fetch_kyc_status\n"
             "   → If result says verified: skip to Step 4\n"
@@ -632,6 +698,7 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
             "NEVER skip steps. NEVER call reserve_bed without completing KYC AND payment first."
         )
     else:
+        # Payment → Reserve, no KYC
         kyc_reservation_flow = (
             "Step 2: PAYMENT\n"
             "   a. Call create_payment_link with property_name\n"

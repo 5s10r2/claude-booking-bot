@@ -14,12 +14,12 @@ _TOOL_HANDLERS: dict[str, Callable] = {}
 _TOOL_SCHEMAS: dict[str, dict] = {}
 
 _KYC_TOOLS: list[str] = ["fetch_kyc_status", "initiate_kyc", "verify_kyc"]
+_PAYMENT_TOOLS: list[str] = ["create_payment_link", "verify_payment"]
 _BOOKING_BASE_TOOLS: list[str] = [
     "save_phone_number",
     "save_visit_time",
     "save_call_time",
-    "create_payment_link",
-    "verify_payment",
+    # create_payment_link, verify_payment → moved to _PAYMENT_TOOLS (conditional on PAYMENT_REQUIRED)
     "check_reserve_bed",
     "reserve_bed",
     "cancel_booking",
@@ -42,7 +42,7 @@ _AGENT_TOOLS: dict[str, list[str]] = {
         "compare_properties",
         "web_search",
     ],
-    "booking": _BOOKING_BASE_TOOLS + (_KYC_TOOLS if settings.KYC_ENABLED else []) + ["save_preferences", "web_search"],
+    "booking": _BOOKING_BASE_TOOLS + (_PAYMENT_TOOLS if settings.PAYMENT_REQUIRED else []) + (_KYC_TOOLS if settings.KYC_ENABLED else []) + ["save_preferences", "web_search"],
     "profile": [
         "fetch_profile_details",
         "get_scheduled_events",

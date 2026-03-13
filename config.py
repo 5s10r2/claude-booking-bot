@@ -49,6 +49,7 @@ class Settings(BaseSettings):
 
     # Feature flags
     KYC_ENABLED: bool = False  # Set KYC_ENABLED=true in env to re-enable Aadhaar verification
+    PAYMENT_REQUIRED: bool = False  # Token payment before reservation. Toggle ON in admin panel when needed.
     DYNAMIC_SKILLS_ENABLED: bool = True  # Dynamic skill loading for broker agent. Set false to fall back to monolithic prompt.
 
     # Agent settings

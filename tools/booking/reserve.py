@@ -17,9 +17,19 @@ CHECK_RESERVE_BED_SCHEMA = {
     },
 }
 
+_reserve_prereq = (
+    "ONLY call after KYC verification and payment completion."
+    if settings.PAYMENT_REQUIRED and settings.KYC_ENABLED
+    else "ONLY call after payment completion."
+    if settings.PAYMENT_REQUIRED
+    else "ONLY call after KYC verification."
+    if settings.KYC_ENABLED
+    else "Call to reserve a bed/room at a property."
+)
+
 RESERVE_BED_SCHEMA = {
     "name": "reserve_bed",
-    "description": "Reserve a bed/room at a property. ONLY call after KYC verification and payment completion.",
+    "description": f"Reserve a bed/room at a property. {_reserve_prereq}",
     "input_schema": {
         "type": "object",
         "additionalProperties": False,

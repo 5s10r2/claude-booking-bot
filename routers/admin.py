@@ -30,7 +30,7 @@ import traceback
 import uuid as uuid_lib
 from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -496,24 +496,38 @@ async def admin_get_flags():
     return {
         "DYNAMIC_SKILLS_ENABLED": settings.DYNAMIC_SKILLS_ENABLED,
         "KYC_ENABLED":            settings.KYC_ENABLED,
+        "PAYMENT_REQUIRED":       settings.PAYMENT_REQUIRED,
         "WEB_SEARCH_ENABLED":     bool(settings.TAVILY_API_KEY),
     }
 
 
-class FlagUpdateRequest(BaseModel):
-    DYNAMIC_SKILLS_ENABLED: bool | None = None
-    KYC_ENABLED:            bool | None = None
-    WEB_SEARCH_ENABLED:     bool | None = None
+# Mutable flags that can be toggled at runtime (in-memory; restart resets to env).
+_MUTABLE_FLAGS = {"DYNAMIC_SKILLS_ENABLED", "KYC_ENABLED", "PAYMENT_REQUIRED"}
 
 
 @router.post("/admin/flags", dependencies=[Depends(verify_api_key)])
-async def admin_set_flags(req: FlagUpdateRequest):
-    """Update runtime feature flags (in-memory only; restart resets to env values)."""
-    if req.DYNAMIC_SKILLS_ENABLED is not None:
-        settings.DYNAMIC_SKILLS_ENABLED = req.DYNAMIC_SKILLS_ENABLED
-    if req.KYC_ENABLED is not None:
-        settings.KYC_ENABLED = req.KYC_ENABLED
-    return {"ok": True}
+async def admin_set_flags(request: Request):
+    """Update runtime feature flags (in-memory only; restart resets to env values).
+
+    Accepts both payload formats:
+      - { "key": "FLAG_NAME", "value": bool }  (frontend sends this)
+      - { "FLAG_NAME": bool }                  (direct API usage)
+    """
+    body = await request.json()
+
+    # Support both: { KEY: value } and { key: "KEY", value: bool }
+    if "key" in body and "value" in body:
+        updates = {body["key"]: body["value"]}
+    else:
+        updates = body
+
+    changed = {}
+    for flag in _MUTABLE_FLAGS:
+        if flag in updates and updates[flag] is not None:
+            setattr(settings, flag, bool(updates[flag]))
+            changed[flag] = getattr(settings, flag)
+
+    return {"ok": True, "changed": changed}
 
 
 # ---------------------------------------------------------------------------
