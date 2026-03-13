@@ -75,19 +75,11 @@ async def save_visit_time(
     except Exception as e:
         return f"Error scheduling visit: {str(e)}"
 
-    if not data.get("success") and resp.status_code != 200:
+    # Bug fix: 'and' was wrong — 200 + success:false would fall through silently.
+    # Now: any non-success body is treated as a failure regardless of HTTP status.
+    if not data.get("success"):
         msg = data.get("message", "unknown error")
         return f"Booking failed: {msg}. Please try again."
-
-    # Create external lead if needed
-    eazypg_id = prop.get("eazypg_id", "")
-    pg_id = prop.get("pg_id", "")
-    pg_number = prop.get("pg_number", "")
-    if eazypg_id:
-        await _create_external_lead(
-            user_id, eazypg_id, pg_id, pg_number,
-            visit_date, visit_time, visit_type,
-        )
 
     prop_lat = prop.get("property_lat", "")
     prop_long = prop.get("property_long", "")
@@ -112,8 +104,34 @@ async def save_visit_time(
     except Exception as e:
         logger.warning("follow-up scheduling failed: %s", e)
 
+    # Create external CRM lead — required for property owner visibility.
+    # If this fails, the booking record exists internally but the owner won't see it,
+    # so we surface a partial-failure message instead of a false "success".
+    eazypg_id = prop.get("eazypg_id", "")
+    pg_id = prop.get("pg_id", "")
+    pg_number = prop.get("pg_number", "")
+    prop_display = prop.get("property_name", property_name)
+    phone = get_user_phone(user_id) or ""
+
+    if eazypg_id:
+        lead_ok = await _create_external_lead(
+            user_id, eazypg_id, pg_id, pg_number,
+            visit_date, visit_time, visit_type,
+        )
+        if not lead_ok:
+            logger.error(
+                "lead creation failed after booking success — user=%s eazypg_id=%s property=%s",
+                user_id, eazypg_id, prop_display,
+            )
+            return (
+                f"We received your visit request for '{prop_display}' on {visit_date} at {visit_time}, "
+                f"but ran into a technical issue confirming it with the property team. "
+                f"Our team will reach out to you{' on ' + phone if phone else ''} to confirm. "
+                f"We apologize for the inconvenience!"
+            )
+
     return (
-        f"Visit scheduled successfully for '{prop.get('property_name', property_name)}' "
+        f"Visit scheduled successfully for '{prop_display}' "
         f"on {visit_date} at {visit_time} ({visit_type}).{location_info}"
     )
 
@@ -126,8 +144,8 @@ async def _create_external_lead(
     visit_date: str,
     visit_time: str,
     visit_type: str,
-) -> None:
-    """Create an external lead entry for tracking."""
+) -> bool:
+    """Create an external CRM lead entry. Returns True on success, False on any failure."""
     from db.redis_store import get_preferences, get_aadhar_gender
 
     gender = get_aadhar_gender(user_id) or "Any"
@@ -160,5 +178,7 @@ async def _create_external_lead(
             f"{settings.RENTOK_API_BASE_URL}/tenant/addLeadFromEazyPGID",
             json=payload,
         )
+        return True
     except Exception as e:
-        logger.warning("lead creation failed for user=%s eazypg_id=%s: %s", user_id, eazypg_id, e)
+        logger.error("lead creation failed for user=%s eazypg_id=%s: %s", user_id, eazypg_id, e)
+        return False
