@@ -162,6 +162,11 @@ async def verify_payment(user_id: str, **kwargs) -> str:
             eazypg_id = p.get("eazypg_id", "")
             break
 
+    # Update lead status to Token in CRM — required for property owner visibility.
+    # Payment is already recorded above; this is a secondary CRM update.
+    # If it fails, still clear state and return a partial-failure message so the user
+    # is not told "success" when the owner's dashboard won't reflect the token status.
+    lead_token_ok = True
     if eazypg_id:
         try:
             from datetime import datetime
@@ -190,9 +195,24 @@ async def verify_payment(user_id: str, **kwargs) -> str:
                 },
             )
         except Exception as e:
-            logger.warning("lead Token update failed for user=%s eazypg_id=%s: %s", user_id, eazypg_id, e)
+            logger.error(
+                "lead Token update failed after payment success — user=%s eazypg_id=%s: %s",
+                user_id, eazypg_id, e,
+            )
+            lead_token_ok = False
 
+    # Always clear state — payment is recorded regardless of CRM status
     clear_payment_info(user_id)
     track_funnel(user_id, "booking")
     cancel_followups(user_id, "payment_pending")
+
+    if eazypg_id and not lead_token_ok:
+        phone = get_user_phone(user_id) or ""
+        return (
+            f"Your payment for {pg_name} has been received, "
+            f"but we ran into a technical issue updating your booking status with the property team. "
+            f"Our team will reach out to you{' on ' + phone if phone else ''} to confirm. "
+            f"We apologize for the inconvenience! You can still proceed with bed reservation."
+        )
+
     return f"Payment verified successfully for {pg_name}. You can now proceed with bed reservation."

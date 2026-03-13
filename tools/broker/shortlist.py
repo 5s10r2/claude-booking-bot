@@ -45,8 +45,14 @@ async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
                 },
             )
             resp.raise_for_status()
+            data = resp.json()
     except Exception as e:
         return f"Error shortlisting property: {str(e)}"
+
+    # Bug fix: API can return HTTP 200 with success:false — treat as failure.
+    if not data.get("success"):
+        msg = data.get("message", "unknown error")
+        return f"Could not shortlist '{property_name}': {msg}. Please try again."
 
     track_funnel(user_id, "shortlist")
     record_property_shortlisted(user_id, prop_id)
