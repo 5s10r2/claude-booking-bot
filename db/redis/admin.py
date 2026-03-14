@@ -1,8 +1,9 @@
 """
-db/redis/admin.py — Admin portal state: user enumeration, human mode, session cost.
+db/redis/admin.py — Admin portal state: user enumeration, human mode, session cost, brand tagging.
 
 Covers:
-  - Active users sorted set (get/count)
+  - Active users sorted set (global + per-brand)
+  - User → brand mapping (set/get)
   - Human mode takeover (get/set/clear)
   - Session cost tracking (per-user, 7-day TTL)
 """
@@ -13,7 +14,7 @@ from db.redis._base import _r
 
 
 # ---------------------------------------------------------------------------
-# Admin portal — user enumeration
+# Admin portal — user enumeration (global)
 # ---------------------------------------------------------------------------
 
 def get_active_users(offset: int = 0, limit: int = 50) -> list[str]:
@@ -31,23 +32,70 @@ def get_active_users_count() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Brand user tagging + per-brand user enumeration
+# ---------------------------------------------------------------------------
+
+def set_user_brand(uid: str, brand_hash: str) -> None:
+    """Tag a user with their brand. No TTL — persistent."""
+    _r().set(f"{uid}:brand_hash", brand_hash)
+
+
+def get_user_brand(uid: str) -> str | None:
+    """Return the brand_hash for this user, or None."""
+    raw = _r().get(f"{uid}:brand_hash")
+    return raw.decode() if raw else None
+
+
+def add_to_brand_active_users(uid: str, brand_hash: str) -> None:
+    """Add user to brand-scoped active_users sorted set."""
+    _r().zadd(f"active_users:{brand_hash}", {uid: time.time()})
+
+
+def get_brand_active_users(brand_hash: str, offset: int = 0, limit: int = 50) -> list[str]:
+    """Return UIDs for a specific brand, sorted by recency."""
+    raw = _r().zrevrange(f"active_users:{brand_hash}", offset, offset + limit - 1)
+    return [uid.decode() if isinstance(uid, bytes) else uid for uid in raw]
+
+
+def get_brand_active_users_count(brand_hash: str) -> int:
+    """Return total number of tracked users for a brand."""
+    return _r().zcard(f"active_users:{brand_hash}") or 0
+
+
+# ---------------------------------------------------------------------------
 # Human mode (admin takeover)
 # ---------------------------------------------------------------------------
 
-def get_human_mode(uid: str) -> bool:
-    """Return True if admin has taken over this conversation."""
+def get_human_mode(uid: str, brand_hash: str | None = None) -> bool:
+    """Return True if admin has taken over this conversation.
+
+    Checks brand-scoped key first (``{uid}:{brand_hash}:human_mode``), then
+    falls back to the global key (``{uid}:human_mode``) for backward compat
+    with pre-migration takeovers.
+    """
+    if brand_hash:
+        val = _r().hget(f"{uid}:{brand_hash}:human_mode", "active")
+        if val == b"1" or val == "1":
+            return True
+    # Fallback: global key (backward compat with pre-migration takeovers)
     val = _r().hget(f"{uid}:human_mode", "active")
     return val == b"1" or val == "1"
 
 
-def set_human_mode(uid: str) -> None:
-    """Activate human takeover for uid. Admin messages are sent manually."""
-    _r().hset(f"{uid}:human_mode", mapping={"active": "1", "taken_at": str(time.time())})
+def set_human_mode(uid: str, brand_hash: str | None = None) -> None:
+    """Activate human takeover. Brand-scoped if *brand_hash* is provided."""
+    key = f"{uid}:{brand_hash}:human_mode" if brand_hash else f"{uid}:human_mode"
+    _r().hset(key, mapping={"active": "1", "taken_at": str(time.time())})
 
 
-def clear_human_mode(uid: str) -> None:
-    """Deactivate human takeover — AI resumes handling the conversation."""
-    _r().delete(f"{uid}:human_mode")
+def clear_human_mode(uid: str, brand_hash: str | None = None) -> None:
+    """Deactivate human takeover — AI resumes handling the conversation.
+
+    Always clears the global key as well for backward-compat cleanup.
+    """
+    if brand_hash:
+        _r().delete(f"{uid}:{brand_hash}:human_mode")
+    _r().delete(f"{uid}:human_mode")  # Always clear global for migration cleanup
 
 
 # ---------------------------------------------------------------------------

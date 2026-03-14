@@ -157,13 +157,16 @@ def _extract_existing_summary(messages: list[dict]) -> tuple[str, list[dict]]:
 # Core summarization
 # ---------------------------------------------------------------------------
 
-async def maybe_summarize(messages: list[dict], user_id: str) -> list[dict]:
+async def maybe_summarize(messages: list[dict], user_id: str, brand_hash: str | None = None) -> list[dict]:
     """Summarize older messages if conversation exceeds threshold.
 
     Returns the (potentially compacted) message list:
     - If below threshold: returns messages unchanged
     - If above threshold: returns [summary_user, summary_assistant] + recent messages
     - On error: falls back to plain truncation (current behavior)
+
+    If *brand_hash* is provided, the brand name is injected as context so the
+    summary correctly attributes the conversation to the right brand.
     """
     if len(messages) < SUMMARIZE_THRESHOLD:
         return messages
@@ -185,11 +188,27 @@ async def maybe_summarize(messages: list[dict], user_id: str) -> list[dict]:
         # Format only the new messages (prior summary handled separately)
         transcript = _format_messages_for_summary(messages_to_summarize)
 
+        # Resolve brand context for the summary
+        brand_context = ""
+        if brand_hash:
+            try:
+                from db.redis.brand import get_brand_config_by_hash
+                bcfg = get_brand_config_by_hash(brand_hash)
+                if bcfg and bcfg.get("brand_name"):
+                    brand_context = (
+                        f"\n## Brand Context\n"
+                        f"This conversation belongs to the brand **{bcfg['brand_name']}** "
+                        f"(cities: {bcfg.get('cities', 'N/A')}).\n"
+                    )
+            except Exception:
+                pass  # Non-critical — proceed without brand context
+
         # Build the summarizer prompt content
         if prior_summary:
             # Hierarchical path: prior summary as structured input + new messages
             prompt_content = (
                 f"{SUMMARIZER_PROMPT}\n\n"
+                f"{brand_context}"
                 f"--- PRIOR SUMMARY (incorporate all tracked properties, preferences, decisions) ---\n\n"
                 f"{prior_summary}\n\n"
                 f"--- NEW MESSAGES TO INTEGRATE ---\n\n"
@@ -206,6 +225,7 @@ async def maybe_summarize(messages: list[dict], user_id: str) -> list[dict]:
             # First summarization — no prior summary to merge
             prompt_content = (
                 f"{SUMMARIZER_PROMPT}\n\n"
+                f"{brand_context}"
                 f"--- CONVERSATION TO SUMMARIZE ---\n\n"
                 f"{transcript}\n\n"
                 f"--- END OF CONVERSATION ---\n\n"

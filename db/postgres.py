@@ -53,6 +53,7 @@ async def insert_message(
     platform_type: str,
     is_template: bool = False,
     pg_ids: Optional[list] = None,
+    brand_hash: Optional[str] = None,
 ) -> Optional[int]:
     if _pool is None:
         return None
@@ -62,8 +63,8 @@ async def insert_message(
             """
             INSERT INTO booking_messages
             (thread_id, user_phone, message_text, message_sent_by,
-             created_at, updated_at, platform_type, is_template, pg_ids)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             created_at, updated_at, platform_type, is_template, pg_ids, brand_hash)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING id
             """,
             thread_id,
@@ -75,6 +76,7 @@ async def insert_message(
             platform_type,
             is_template,
             json.dumps(pg_ids) if pg_ids else None,
+            brand_hash,
         )
         return row["id"] if row else None
     except Exception as e:
@@ -82,27 +84,66 @@ async def insert_message(
         return None
 
 
-async def get_message_volume(start_date: str, end_date: str) -> dict:
-    """Return daily message counts: {"2026-02-20": 42, ...}."""
+async def get_message_volume(start_date: str, end_date: str, brand_hash: Optional[str] = None) -> dict:
+    """Return daily message counts: {"2026-02-20": 42, ...}.
+    Brand-scoped if brand_hash provided.
+    """
     if _pool is None:
         return {}
     try:
-        rows = await _pool.fetch(
-            """
-            SELECT DATE(created_at) AS day, COUNT(*) AS cnt
-            FROM booking_messages
-            WHERE created_at >= $1::date
-              AND created_at < ($2::date + INTERVAL '1 day')
-            GROUP BY DATE(created_at)
-            ORDER BY day
-            """,
-            start_date,
-            end_date,
-        )
+        if brand_hash:
+            rows = await _pool.fetch(
+                """
+                SELECT DATE(created_at) AS day, COUNT(*) AS cnt
+                FROM booking_messages
+                WHERE created_at >= $1::date
+                  AND created_at < ($2::date + INTERVAL '1 day')
+                  AND brand_hash = $3
+                GROUP BY DATE(created_at)
+                ORDER BY day
+                """,
+                start_date,
+                end_date,
+                brand_hash,
+            )
+        else:
+            rows = await _pool.fetch(
+                """
+                SELECT DATE(created_at) AS day, COUNT(*) AS cnt
+                FROM booking_messages
+                WHERE created_at >= $1::date
+                  AND created_at < ($2::date + INTERVAL '1 day')
+                GROUP BY DATE(created_at)
+                ORDER BY day
+                """,
+                start_date,
+                end_date,
+            )
         return {str(r["day"]): r["cnt"] for r in rows}
     except Exception as e:
         logger.error("get_message_volume error: %s", e)
         return {}
+
+
+async def add_brand_hash_columns() -> None:
+    """Add brand_hash column to booking_messages and leads tables (idempotent migration)."""
+    if _pool is None:
+        return
+    try:
+        await _pool.execute("""
+            ALTER TABLE booking_messages ADD COLUMN IF NOT EXISTS brand_hash VARCHAR(16);
+            CREATE INDEX IF NOT EXISTS idx_booking_messages_brand_hash
+                ON booking_messages(brand_hash);
+        """)
+    except Exception as e:
+        logger.warning("add_brand_hash_columns (booking_messages): %s", e)
+    try:
+        await _pool.execute("""
+            ALTER TABLE leads ADD COLUMN IF NOT EXISTS brand_hash VARCHAR(16);
+            CREATE INDEX IF NOT EXISTS idx_leads_brand_hash ON leads(brand_hash);
+        """)
+    except Exception as e:
+        logger.warning("add_brand_hash_columns (leads): %s", e)
 
 
 async def create_property_documents_table() -> None:
@@ -251,7 +292,7 @@ async def create_leads_table() -> None:
         logger.warning("create_leads_table: %s", e)
 
 
-async def upsert_leads(rows: list[dict]) -> None:
+async def upsert_leads(rows: list[dict], brand_hash: Optional[str] = None) -> None:
     """Batch upsert enriched lead snapshots. Called fire-and-forget from admin endpoints."""
     if _pool is None or not rows:
         return
@@ -263,10 +304,10 @@ async def upsert_leads(rows: list[dict]) -> None:
                 first_seen, last_seen, session_count, viewed_count, shortlisted_count,
                 visits_count, deal_breakers, must_haves, lead_score, location_pref,
                 budget_min, budget_max, budget, property_type, amenities,
-                sharing_types, cost_usd, synced_at
+                sharing_types, cost_usd, brand_hash, synced_at
             )
             VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NOW()
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW()
             )
             ON CONFLICT (uid) DO UPDATE SET
                 name=EXCLUDED.name, phone=EXCLUDED.phone,
@@ -280,6 +321,7 @@ async def upsert_leads(rows: list[dict]) -> None:
                 budget_max=EXCLUDED.budget_max, budget=EXCLUDED.budget,
                 property_type=EXCLUDED.property_type, amenities=EXCLUDED.amenities,
                 sharing_types=EXCLUDED.sharing_types, cost_usd=EXCLUDED.cost_usd,
+                brand_hash=EXCLUDED.brand_hash,
                 synced_at=NOW()
             """,
             [
@@ -305,6 +347,7 @@ async def upsert_leads(rows: list[dict]) -> None:
                     json.dumps(r.get("amenities") or []),
                     json.dumps(r.get("sharing_types") or []),
                     float(r.get("cost_usd") or 0.0),
+                    brand_hash,
                 )
                 for r in rows
             ],

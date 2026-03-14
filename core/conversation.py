@@ -5,13 +5,13 @@ class ConversationManager:
     def get_history(self, user_id: str) -> list[dict]:
         return get_conversation(user_id)
 
-    def add_user_message(self, user_id: str, content: str) -> list[dict]:
+    def add_user_message(self, user_id: str, content: str, brand_hash: str | None = None) -> list[dict]:
         messages = self.get_history(user_id)
         messages.append({"role": "user", "content": content})
-        save_conversation(user_id, messages)
+        save_conversation(user_id, messages, brand_hash=brand_hash)
         return messages
 
-    async def add_user_message_with_summary(self, user_id: str, content: str) -> list[dict]:
+    async def add_user_message_with_summary(self, user_id: str, content: str, brand_hash: str | None = None) -> list[dict]:
         """Add user message and run summarization if conversation is long.
 
         Returns the (potentially compacted) message list ready for Claude.
@@ -20,14 +20,14 @@ class ConversationManager:
 
         messages = self.get_history(user_id)
         messages.append({"role": "user", "content": content})
-        messages = await maybe_summarize(messages, user_id)
-        save_conversation(user_id, messages)
+        messages = await maybe_summarize(messages, user_id, brand_hash=brand_hash)
+        save_conversation(user_id, messages, brand_hash=brand_hash)
         return messages
 
-    def add_assistant_message(self, user_id: str, content: str) -> list[dict]:
+    def add_assistant_message(self, user_id: str, content: str, brand_hash: str | None = None) -> list[dict]:
         messages = self.get_history(user_id)
         messages.append({"role": "assistant", "content": content})
-        save_conversation(user_id, messages)
+        save_conversation(user_id, messages, brand_hash=brand_hash)
         return messages
 
     def clear(self, user_id: str) -> None:

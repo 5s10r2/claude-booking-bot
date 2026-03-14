@@ -21,7 +21,7 @@ from db.redis._base import _r, ANALYTICS_TTL
 # Feedback (thumbs up / down)
 # ---------------------------------------------------------------------------
 
-def save_feedback(user_id: str, message_snippet: str, rating: str, agent: str = "") -> None:
+def save_feedback(user_id: str, message_snippet: str, rating: str, agent: str = "", brand_hash: str = None) -> None:
     """Store a feedback entry. rating is 'up' or 'down'."""
     entry = json.dumps({
         "user_id": user_id,
@@ -30,15 +30,22 @@ def save_feedback(user_id: str, message_snippet: str, rating: str, agent: str = 
         "agent": agent,
         "ts": time.time(),
     })
-    _r().rpush("feedback:log", entry)
-    # Aggregate counters per agent
-    _r().hincrby("feedback:counts", f"{agent}:{rating}", 1)
-    _r().hincrby("feedback:counts", f"total:{rating}", 1)
+    pipe = _r().pipeline(transaction=False)
+    pipe.rpush("feedback:log", entry)
+    # Aggregate counters per agent (global)
+    pipe.hincrby("feedback:counts", f"{agent}:{rating}", 1)
+    pipe.hincrby("feedback:counts", f"total:{rating}", 1)
+    # Brand-scoped counters
+    if brand_hash:
+        pipe.hincrby(f"feedback:counts:{brand_hash}", f"{agent}:{rating}", 1)
+        pipe.hincrby(f"feedback:counts:{brand_hash}", f"total:{rating}", 1)
+    pipe.execute()
 
 
-def get_feedback_counts() -> dict[str, int]:
-    """Return all feedback counters as a dict."""
-    raw = _r().hgetall("feedback:counts")
+def get_feedback_counts(brand_hash: str = None) -> dict[str, int]:
+    """Return all feedback counters as a dict. Brand-scoped if brand_hash provided."""
+    key = f"feedback:counts:{brand_hash}" if brand_hash else "feedback:counts"
+    raw = _r().hgetall(key)
     return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
 
 
@@ -46,19 +53,26 @@ def get_feedback_counts() -> dict[str, int]:
 # Agent usage tracking (analytics)
 # ---------------------------------------------------------------------------
 
-def track_agent_usage(user_id: str, agent_name: str) -> None:
+def track_agent_usage(user_id: str, agent_name: str, brand_hash: str = None) -> None:
     """Increment agent usage counter for today. 90-day TTL."""
     day = date.today().isoformat()
     key = f"agent_usage:{day}"
-    _r().hincrby(key, agent_name, 1)
-    _r().expire(key, ANALYTICS_TTL)
+    pipe = _r().pipeline(transaction=False)
+    pipe.hincrby(key, agent_name, 1)
+    pipe.expire(key, ANALYTICS_TTL)
+    if brand_hash:
+        bkey = f"agent_usage:{brand_hash}:{day}"
+        pipe.hincrby(bkey, agent_name, 1)
+        pipe.expire(bkey, ANALYTICS_TTL)
+    pipe.execute()
 
 
-def get_agent_usage(day: str = None) -> dict[str, int]:
-    """Return {agent: count} for a given day (default: today)."""
+def get_agent_usage(day: str = None, brand_hash: str = None) -> dict[str, int]:
+    """Return {agent: count} for a given day (default: today). Brand-scoped if brand_hash provided."""
     if day is None:
         day = date.today().isoformat()
-    raw = _r().hgetall(f"agent_usage:{day}")
+    key = f"agent_usage:{brand_hash}:{day}" if brand_hash else f"agent_usage:{day}"
+    raw = _r().hgetall(key)
     return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
 
 
@@ -66,7 +80,7 @@ def get_agent_usage(day: str = None) -> dict[str, int]:
 # Skill usage tracking (dynamic skills system)
 # ---------------------------------------------------------------------------
 
-def track_skill_usage(skills: list[str]) -> None:
+def track_skill_usage(skills: list[str], brand_hash: str = None) -> None:
     """Increment skill usage counters for today. 90-day TTL."""
     if not skills:
         return
@@ -76,30 +90,43 @@ def track_skill_usage(skills: list[str]) -> None:
     for skill in skills:
         pipe.hincrby(key, skill, 1)
     pipe.expire(key, ANALYTICS_TTL)
+    if brand_hash:
+        bkey = f"skill_usage:{brand_hash}:{day}"
+        for skill in skills:
+            pipe.hincrby(bkey, skill, 1)
+        pipe.expire(bkey, ANALYTICS_TTL)
     pipe.execute()
 
 
-def track_skill_miss(tool_name: str) -> None:
+def track_skill_miss(tool_name: str, brand_hash: str = None) -> None:
     """Increment counter when a tool is not in filtered set (skill detection miss). 90-day TTL."""
     day = date.today().isoformat()
     key = f"skill_misses:{day}"
-    _r().hincrby(key, tool_name, 1)
-    _r().expire(key, ANALYTICS_TTL)
+    pipe = _r().pipeline(transaction=False)
+    pipe.hincrby(key, tool_name, 1)
+    pipe.expire(key, ANALYTICS_TTL)
+    if brand_hash:
+        bkey = f"skill_misses:{brand_hash}:{day}"
+        pipe.hincrby(bkey, tool_name, 1)
+        pipe.expire(bkey, ANALYTICS_TTL)
+    pipe.execute()
 
 
-def get_skill_usage(day: str = None) -> dict[str, int]:
-    """Return {skill: count} for a given day (default: today)."""
+def get_skill_usage(day: str = None, brand_hash: str = None) -> dict[str, int]:
+    """Return {skill: count} for a given day (default: today). Brand-scoped if brand_hash provided."""
     if day is None:
         day = date.today().isoformat()
-    raw = _r().hgetall(f"skill_usage:{day}")
+    key = f"skill_usage:{brand_hash}:{day}" if brand_hash else f"skill_usage:{day}"
+    raw = _r().hgetall(key)
     return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
 
 
-def get_skill_misses(day: str = None) -> dict[str, int]:
-    """Return {tool_name: miss_count} for a given day (default: today)."""
+def get_skill_misses(day: str = None, brand_hash: str = None) -> dict[str, int]:
+    """Return {tool_name: miss_count} for a given day (default: today). Brand-scoped if brand_hash provided."""
     if day is None:
         day = date.today().isoformat()
-    raw = _r().hgetall(f"skill_misses:{day}")
+    key = f"skill_misses:{brand_hash}:{day}" if brand_hash else f"skill_misses:{day}"
+    raw = _r().hgetall(key)
     return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
 
 
@@ -110,21 +137,28 @@ def get_skill_misses(day: str = None) -> dict[str, int]:
 FUNNEL_STAGES = ("search", "detail", "shortlist", "visit", "booking")
 
 
-def track_funnel(user_id: str, stage: str) -> None:
+def track_funnel(user_id: str, stage: str, brand_hash: str = None) -> None:
     """Increment a funnel stage counter. Idempotent per user+stage per day."""
     if stage not in FUNNEL_STAGES:
         return
     day = date.today().isoformat()
     key = f"funnel:{day}"
-    _r().hincrby(key, stage, 1)
-    _r().expire(key, ANALYTICS_TTL)  # keep 90 days
+    pipe = _r().pipeline(transaction=False)
+    pipe.hincrby(key, stage, 1)
+    pipe.expire(key, ANALYTICS_TTL)  # keep 90 days
+    if brand_hash:
+        bkey = f"funnel:{brand_hash}:{day}"
+        pipe.hincrby(bkey, stage, 1)
+        pipe.expire(bkey, ANALYTICS_TTL)
+    pipe.execute()
 
 
-def get_funnel(day: str = None) -> dict[str, int]:
-    """Return funnel counts for a given day (default: today)."""
+def get_funnel(day: str = None, brand_hash: str = None) -> dict[str, int]:
+    """Return funnel counts for a given day (default: today). Brand-scoped if brand_hash provided."""
     if day is None:
         day = date.today().isoformat()
-    raw = _r().hgetall(f"funnel:{day}")
+    key = f"funnel:{brand_hash}:{day}" if brand_hash else f"funnel:{day}"
+    raw = _r().hgetall(key)
     return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
 
 
@@ -132,7 +166,7 @@ def get_funnel(day: str = None) -> dict[str, int]:
 # Per-agent cost tracking (streaming path — fire-and-forget)
 # ---------------------------------------------------------------------------
 
-def increment_agent_cost(agent_name: str, tokens_in: int, tokens_out: int, cost_usd: float) -> None:
+def increment_agent_cost(agent_name: str, tokens_in: int, tokens_out: int, cost_usd: float, brand_hash: str = None) -> None:
     """Accumulate per-agent token usage + cost for today. 90-day TTL.
 
     Writes to hash  agent_cost:{YYYY-MM-DD}
@@ -146,17 +180,25 @@ def increment_agent_cost(agent_name: str, tokens_in: int, tokens_out: int, cost_
     pipe.hincrbyfloat(key, f"{agent_name}:tokens_out", tokens_out)
     pipe.hincrbyfloat(key, f"{agent_name}:cost_usd", cost_usd)
     pipe.expire(key, ANALYTICS_TTL)
+    if brand_hash:
+        bkey = f"agent_cost:{brand_hash}:{day}"
+        pipe.hincrbyfloat(bkey, f"{agent_name}:tokens_in", tokens_in)
+        pipe.hincrbyfloat(bkey, f"{agent_name}:tokens_out", tokens_out)
+        pipe.hincrbyfloat(bkey, f"{agent_name}:cost_usd", cost_usd)
+        pipe.expire(bkey, ANALYTICS_TTL)
     pipe.execute()
 
 
-def get_agent_costs(day: str = None) -> dict[str, dict]:
+def get_agent_costs(day: str = None, brand_hash: str = None) -> dict[str, dict]:
     """Return {agent: {tokens_in, tokens_out, cost_usd}} for a given day (default: today).
 
     Returns empty dict if no cost data has been tracked yet for that day.
+    Brand-scoped if brand_hash provided.
     """
     if day is None:
         day = date.today().isoformat()
-    raw = _r().hgetall(f"agent_cost:{day}")
+    key = f"agent_cost:{brand_hash}:{day}" if brand_hash else f"agent_cost:{day}"
+    raw = _r().hgetall(key)
     if not raw:
         return {}
     result: dict[str, dict] = {}
@@ -177,7 +219,7 @@ def get_agent_costs(day: str = None) -> dict[str, dict]:
     return result
 
 
-def increment_daily_cost(cost_usd: float) -> None:
+def increment_daily_cost(cost_usd: float, brand_hash: str = None) -> None:
     """Accumulate today's total cost across all agents. 90-day TTL.
 
     Writes to hash  daily_cost:{YYYY-MM-DD}
@@ -186,15 +228,24 @@ def increment_daily_cost(cost_usd: float) -> None:
     """
     day = date.today().isoformat()
     key = f"daily_cost:{day}"
-    _r().hincrbyfloat(key, "cost_usd", cost_usd)
-    _r().expire(key, ANALYTICS_TTL)
+    pipe = _r().pipeline(transaction=False)
+    pipe.hincrbyfloat(key, "cost_usd", cost_usd)
+    pipe.expire(key, ANALYTICS_TTL)
+    if brand_hash:
+        bkey = f"daily_cost:{brand_hash}:{day}"
+        pipe.hincrbyfloat(bkey, "cost_usd", cost_usd)
+        pipe.expire(bkey, ANALYTICS_TTL)
+    pipe.execute()
 
 
-def get_daily_cost(day: str = None) -> float:
-    """Return total cost_usd for a given day (default: today). Returns 0.0 if no data."""
+def get_daily_cost(day: str = None, brand_hash: str = None) -> float:
+    """Return total cost_usd for a given day (default: today). Returns 0.0 if no data.
+    Brand-scoped if brand_hash provided.
+    """
     if day is None:
         day = date.today().isoformat()
-    raw = _r().hget(f"daily_cost:{day}", "cost_usd")
+    key = f"daily_cost:{brand_hash}:{day}" if brand_hash else f"daily_cost:{day}"
+    raw = _r().hget(key, "cost_usd")
     return round(float(raw), 4) if raw else 0.0
 
 

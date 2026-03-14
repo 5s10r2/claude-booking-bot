@@ -85,12 +85,18 @@ async def chat(req: ChatRequest):
 
     check_rate_limit(req.user_id)
 
-    # Set account values if provided
+    # Set account values if provided + extract brand_hash for user tagging
     if req.account_values:
         set_account_values(req.user_id, req.account_values)
         pg_ids = req.account_values.get("pg_ids", [])
         if pg_ids:
             set_whitelabel_pg_ids(req.user_id, pg_ids)
+        # Tag user with brand on first message
+        brand_hash = req.account_values.get("brand_hash", "")
+        if brand_hash:
+            from db.redis_store import set_user_brand, add_to_brand_active_users
+            set_user_brand(req.user_id, brand_hash)
+            add_to_brand_active_users(req.user_id, brand_hash)
 
     response, agent_name, language = await run_pipeline(req.user_id, req.message)
 
@@ -98,8 +104,10 @@ async def chat(req: ChatRequest):
     if agent_name == "human":
         return ChatResponse(response="", agent="human", parts=[], locale=language)
 
-    # Persist to Postgres
+    # Persist to Postgres (brand-scoped)
     pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
+    from db.redis_store import get_user_brand as _gub_chat
+    _chat_bh = _gub_chat(req.user_id)
     await pg.insert_message(
         thread_id=req.user_id,
         user_phone=req.user_id,
@@ -108,6 +116,7 @@ async def chat(req: ChatRequest):
         platform_type="api",
         is_template=False,
         pg_ids=pg_ids_list,
+        brand_hash=_chat_bh,
     )
     await pg.insert_message(
         thread_id=req.user_id,
@@ -117,6 +126,7 @@ async def chat(req: ChatRequest):
         platform_type="api",
         is_template=False,
         pg_ids=pg_ids_list,
+        brand_hash=_chat_bh,
     )
 
     # Parse structured parts for frontend rendering
@@ -149,12 +159,22 @@ async def chat_stream(req: ChatRequest):
         pg_ids = req.account_values.get("pg_ids", [])
         if pg_ids:
             set_whitelabel_pg_ids(req.user_id, pg_ids)
+        # Tag user with brand on first message
+        brand_hash = req.account_values.get("brand_hash", "")
+        if brand_hash:
+            from db.redis_store import set_user_brand, add_to_brand_active_users
+            set_user_brand(req.user_id, brand_hash)
+            add_to_brand_active_users(req.user_id, brand_hash)
+
+    # Resolve brand_hash once for this request (used in save_conversation calls below)
+    from db.redis_store import get_user_brand
+    stream_brand_hash = get_user_brand(req.user_id)
 
     # Human takeover bypass — save user message and emit empty stream so admin handles it
-    if get_human_mode(req.user_id):
+    if get_human_mode(req.user_id, brand_hash=stream_brand_hash):
         conv = get_conversation(req.user_id)
         conv.append({"role": "user", "content": req.message})
-        save_conversation(req.user_id, conv)
+        save_conversation(req.user_id, conv, brand_hash=stream_brand_hash)
         language = get_user_language(req.user_id) or "en"
 
         async def _human_stream():
@@ -217,10 +237,10 @@ async def chat_stream(req: ChatRequest):
             yield f"event: done\ndata: {json.dumps({'agent': agent_name or 'system', 'full_response': full_text, 'parts': error_parts, 'locale': language})}\n\n"
             # Persist and return
             set_last_agent(req.user_id, agent_name or "system")
-            state.conversation.add_assistant_message(req.user_id, full_text)
+            state.conversation.add_assistant_message(req.user_id, full_text, brand_hash=stream_brand_hash)
             pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
-            await pg.insert_message(thread_id=req.user_id, user_phone=req.user_id, message_text=req.message, message_sent_by=1, platform_type="api", is_template=False, pg_ids=pg_ids_list)
-            await pg.insert_message(thread_id=req.user_id, user_phone=req.user_id, message_text=full_text, message_sent_by=2, platform_type="api", is_template=False, pg_ids=pg_ids_list)
+            await pg.insert_message(thread_id=req.user_id, user_phone=req.user_id, message_text=req.message, message_sent_by=1, platform_type="api", is_template=False, pg_ids=pg_ids_list, brand_hash=stream_brand_hash)
+            await pg.insert_message(thread_id=req.user_id, user_phone=req.user_id, message_text=full_text, message_sent_by=2, platform_type="api", is_template=False, pg_ids=pg_ids_list, brand_hash=stream_brand_hash)
             return
 
         # Parse structured parts for frontend rendering
@@ -242,18 +262,20 @@ async def chat_stream(req: ChatRequest):
 
         # Persist state (same as non-streaming path)
         set_last_agent(req.user_id, agent_name)
-        state.conversation.add_assistant_message(req.user_id, full_text)
+        state.conversation.add_assistant_message(req.user_id, full_text, brand_hash=stream_brand_hash)
 
         pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
         await pg.insert_message(
             thread_id=req.user_id, user_phone=req.user_id,
             message_text=req.message, message_sent_by=1,
             platform_type="api", is_template=False, pg_ids=pg_ids_list,
+            brand_hash=stream_brand_hash,
         )
         await pg.insert_message(
             thread_id=req.user_id, user_phone=req.user_id,
             message_text=full_text, message_sent_by=2,
             platform_type="api", is_template=False, pg_ids=pg_ids_list,
+            brand_hash=stream_brand_hash,
         )
 
     return StreamingResponse(
@@ -272,7 +294,8 @@ async def submit_feedback(req: FeedbackRequest):
     """Record thumbs-up / thumbs-down feedback on a bot response."""
     if req.rating not in ("up", "down"):
         raise HTTPException(status_code=400, detail="rating must be 'up' or 'down'")
-    save_feedback(req.user_id, req.message_snippet, req.rating, req.agent)
+    from db.redis_store import get_user_brand
+    save_feedback(req.user_id, req.message_snippet, req.rating, req.agent, brand_hash=get_user_brand(req.user_id))
     return {"status": "ok"}
 
 

@@ -20,7 +20,7 @@ Routes:
   GET    /admin/properties/{prop_id}/documents
   POST   /admin/properties/{prop_id}/documents
   DELETE /admin/properties/{prop_id}/documents/{doc_id}
-  POST   /admin/backfill-users
+  POST   /admin/backfill-brands
 """
 
 import asyncio
@@ -36,16 +36,18 @@ from pydantic import BaseModel
 
 from channels.whatsapp import send_text
 from config import settings
-from core.auth import CHAT_BASE_URL, require_brand_api_key, verify_api_key
+from core.auth import CHAT_BASE_URL, require_admin_brand_key, require_brand_api_key, verify_api_key
 from core.log import get_logger
 from db import postgres as pg
 from db.redis_store import (
     _r,
     clear_human_mode,
     get_active_users,
-    get_active_users_count,
     get_agent_usage,
+    get_brand_active_users,
+    get_brand_active_users_count,
     get_brand_config,
+    get_brand_config_by_hash,
     get_conversation,
     get_feedback_counts,
     get_funnel,
@@ -55,6 +57,7 @@ from db.redis_store import (
     get_session_cost,
     get_skill_misses,
     get_skill_usage,
+    get_user_brand,
     get_user_memory,
     get_user_phone,
     save_conversation,
@@ -82,6 +85,18 @@ def _r_score(uid: str):
         return None
 
 
+def _require_ownership(uid: str, brand_hash: str) -> None:
+    """Raise 404 if `uid` does not belong to the given brand.
+
+    Uses a lenient check: if the user has no brand tag yet (legacy user),
+    the request is allowed. This avoids breaking admin operations for
+    users who haven't been backfilled yet.
+    """
+    user_brand = get_user_brand(uid)
+    if user_brand and user_brand != brand_hash:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+
 # ---------------------------------------------------------------------------
 # Rate-limit status
 # ---------------------------------------------------------------------------
@@ -97,8 +112,8 @@ async def rate_limit_status(user_id: str):
 # Analytics
 # ---------------------------------------------------------------------------
 
-@router.get("/admin/analytics", dependencies=[Depends(verify_api_key)])
-async def admin_analytics(days: int = 7):
+@router.get("/admin/analytics")
+async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin_brand_key)):
     """Return aggregated analytics data for the dashboard.
 
     Query params:
@@ -107,41 +122,41 @@ async def admin_analytics(days: int = 7):
     today = date.today()
     days = max(1, min(days, 90))
 
-    # --- Funnel: aggregate across date range ---
+    # --- Funnel: aggregate across date range (brand-scoped) ---
     funnel_totals: dict[str, int] = {}
     for i in range(days):
         day = (today - timedelta(days=i)).isoformat()
-        for stage, count in get_funnel(day).items():
+        for stage, count in get_funnel(day, brand_hash=brand_hash).items():
             funnel_totals[stage] = funnel_totals.get(stage, 0) + count
 
-    # --- Feedback ---
-    feedback = get_feedback_counts()
+    # --- Feedback (brand-scoped) ---
+    feedback = get_feedback_counts(brand_hash=brand_hash)
 
-    # --- Message volume (from Postgres) ---
+    # --- Message volume (from Postgres, brand-scoped) ---
     message_volume: dict[str, int] = {}
     try:
         start_date = today - timedelta(days=days - 1)
         message_volume = await pg.get_message_volume(
-            start_date.isoformat(), today.isoformat()
+            start_date.isoformat(), today.isoformat(), brand_hash=brand_hash
         )
     except Exception as e:
         logger.warning("get_message_volume failed: %s", e)
 
-    # --- Agent distribution: aggregate across date range ---
+    # --- Agent distribution: aggregate across date range (brand-scoped) ---
     agent_totals: dict[str, int] = {}
     for i in range(days):
         day = (today - timedelta(days=i)).isoformat()
-        for agent, count in get_agent_usage(day).items():
+        for agent, count in get_agent_usage(day, brand_hash=brand_hash).items():
             agent_totals[agent] = agent_totals.get(agent, 0) + count
 
-    # --- Skill usage: aggregate across date range ---
+    # --- Skill usage: aggregate across date range (brand-scoped) ---
     skill_totals: dict[str, int] = {}
     skill_miss_totals: dict[str, int] = {}
     for i in range(days):
         day = (today - timedelta(days=i)).isoformat()
-        for skill, count in get_skill_usage(day).items():
+        for skill, count in get_skill_usage(day, brand_hash=brand_hash).items():
             skill_totals[skill] = skill_totals.get(skill, 0) + count
-        for tool, count in get_skill_misses(day).items():
+        for tool, count in get_skill_misses(day, brand_hash=brand_hash).items():
             skill_miss_totals[tool] = skill_miss_totals.get(tool, 0) + count
 
     # --- Rate limit status (current snapshot) ---
@@ -152,20 +167,20 @@ async def admin_analytics(days: int = 7):
     except Exception as e:
         logger.warning("rate limit status fetch failed: %s", e)
 
-    # --- Derived KPIs (fields analytics.js expects) ---
+    # --- Derived KPIs — brand-scoped user count & cost ---
     total_messages = sum(message_volume.values())
-    active_users_count = get_active_users_count()
+    active_users_count = get_brand_active_users_count(brand_hash)
     visits_booked = funnel_totals.get("visit", 0)
     new_leads = funnel_totals.get("search", 0)  # anyone who ran a search = engaged lead
 
     # Chronologically sorted daily message counts for the chart
     daily = [{"date": d, "count": c} for d, c in sorted(message_volume.items())]
 
-    # Total cost: sum session_cost across all tracked users (best-effort)
+    # Total cost: sum session_cost across brand's tracked users (best-effort)
     total_cost_usd = 0.0
     try:
-        all_uids = get_active_users(offset=0, limit=500)
-        for uid in all_uids:
+        brand_uids = get_brand_active_users(brand_hash, offset=0, limit=500)
+        for uid in brand_uids:
             total_cost_usd += get_session_cost(uid).get("cost_usd", 0.0)
     except Exception as e:
         logger.warning("cost aggregation failed: %s", e)
@@ -197,21 +212,21 @@ async def admin_analytics(days: int = 7):
 # Conversation browser
 # ---------------------------------------------------------------------------
 
-@router.get("/admin/conversations", dependencies=[Depends(verify_api_key)])
-async def admin_conversations(offset: int = 0, limit: int = 50):
+@router.get("/admin/conversations")
+async def admin_conversations(offset: int = 0, limit: int = 50, brand_hash: str = Depends(require_admin_brand_key)):
     """Return paginated list of users sorted by most recent activity.
 
     Each entry contains enough metadata to render a conversation list row:
     uid, name, phone, last_message preview, last_agent, lead_score, human_mode.
     """
-    total = get_active_users_count()
-    uids = get_active_users(offset=offset, limit=limit)
+    total = get_brand_active_users_count(brand_hash)
+    uids = get_brand_active_users(brand_hash, offset=offset, limit=limit)
 
     rows = []
     for uid in uids:
         mem = get_user_memory(uid)
         conv = get_conversation(uid)
-        human_mode = get_human_mode(uid)
+        human_mode = get_human_mode(uid, brand_hash=brand_hash)
 
         # Last message preview (last non-empty text message)
         last_msg = ""
@@ -248,14 +263,15 @@ async def admin_conversations(offset: int = 0, limit: int = 50):
     }
 
 
-@router.get("/admin/conversations/{uid}", dependencies=[Depends(verify_api_key)])
-async def admin_conversation_detail(uid: str):
+@router.get("/admin/conversations/{uid}")
+async def admin_conversation_detail(uid: str, brand_hash: str = Depends(require_admin_brand_key)):
     """Return full conversation thread + user context for a given uid."""
+    _require_ownership(uid, brand_hash)
     conv = get_conversation(uid)
     mem = get_user_memory(uid)
     prefs = get_preferences(uid)
     cost = get_session_cost(uid)
-    human_mode = get_human_mode(uid)
+    human_mode = get_human_mode(uid, brand_hash=brand_hash)
     last_agent = get_last_agent(uid) or "default"
 
     return {
@@ -274,22 +290,24 @@ class AdminMessageRequest(BaseModel):
     platform: str = "whatsapp"  # "whatsapp" | "web"
 
 
-@router.post("/admin/conversations/{uid}/takeover", dependencies=[Depends(verify_api_key)])
-async def admin_takeover(uid: str):
+@router.post("/admin/conversations/{uid}/takeover")
+async def admin_takeover(uid: str, brand_hash: str = Depends(require_admin_brand_key)):
     """Activate human takeover — AI stops responding for this user."""
-    set_human_mode(uid)
+    _require_ownership(uid, brand_hash)
+    set_human_mode(uid, brand_hash=brand_hash)
     return {"ok": True}
 
 
-@router.post("/admin/conversations/{uid}/resume", dependencies=[Depends(verify_api_key)])
-async def admin_resume(uid: str):
+@router.post("/admin/conversations/{uid}/resume")
+async def admin_resume(uid: str, brand_hash: str = Depends(require_admin_brand_key)):
     """Deactivate human takeover — AI resumes handling this user."""
-    clear_human_mode(uid)
+    _require_ownership(uid, brand_hash)
+    clear_human_mode(uid, brand_hash=brand_hash)
     return {"ok": True}
 
 
-@router.post("/admin/conversations/{uid}/message", dependencies=[Depends(verify_api_key)])
-async def admin_send_message(uid: str, req: AdminMessageRequest):
+@router.post("/admin/conversations/{uid}/message")
+async def admin_send_message(uid: str, req: AdminMessageRequest, brand_hash: str = Depends(require_admin_brand_key)):
     """Send a manual message as the admin (human operator).
 
     The message is delivered via WhatsApp and appended to the conversation
@@ -300,6 +318,7 @@ async def admin_send_message(uid: str, req: AdminMessageRequest):
     admin sends one message and forgets to click "Resume AI", leaving every
     subsequent user message unanswered.
     """
+    _require_ownership(uid, brand_hash)
     sent_at = datetime.utcnow().isoformat()
 
     # Deliver via WhatsApp if platform is whatsapp
@@ -314,11 +333,11 @@ async def admin_send_message(uid: str, req: AdminMessageRequest):
         "source": "human",
         "sent_at": sent_at,
     })
-    save_conversation(uid, conv)
+    save_conversation(uid, conv, brand_hash=brand_hash)
 
     # Auto-resume AI after admin message — prevents silent-bot if admin forgets
     # to click "Resume AI". Admin can re-take-over by calling /takeover again.
-    clear_human_mode(uid)
+    clear_human_mode(uid, brand_hash=brand_hash)
 
     return {"ok": True, "sent_at": sent_at}
 
@@ -327,21 +346,21 @@ async def admin_send_message(uid: str, req: AdminMessageRequest):
 # Command center
 # ---------------------------------------------------------------------------
 
-@router.get("/admin/command-center", dependencies=[Depends(verify_api_key)])
-async def admin_command_center():
+@router.get("/admin/command-center")
+async def admin_command_center(brand_hash: str = Depends(require_admin_brand_key)):
     """Today's at-a-glance stats for the command center home screen."""
     today = date.today().isoformat()
-    day_funnel = get_funnel(today)
-    day_agents = get_agent_usage(today)
+    day_funnel = get_funnel(today, brand_hash=brand_hash)
+    day_agents = get_agent_usage(today, brand_hash=brand_hash)
 
-    # Count conversations currently in human mode
-    all_uids = get_active_users(offset=0, limit=200)
-    human_count = sum(1 for uid in all_uids if get_human_mode(uid))
+    # Count conversations currently in human mode (brand-scoped)
+    brand_uids = get_brand_active_users(brand_hash, offset=0, limit=200)
+    human_count = sum(1 for uid in brand_uids if get_human_mode(uid, brand_hash=brand_hash))
 
     # Message count for today from Postgres (best-effort)
     msg_count = 0
     try:
-        vol = await pg.get_message_volume(today, today)
+        vol = await pg.get_message_volume(today, today, brand_hash=brand_hash)
         msg_count = vol.get(today, 0)
     except Exception:
         pass
@@ -355,11 +374,11 @@ async def admin_command_center():
         },
         "funnel":               day_funnel,
         "agents":               day_agents,
-        "active_conversations": get_active_users_count(),
+        "active_conversations": get_brand_active_users_count(brand_hash),
         "human_mode_count":     human_count,
         # Cost fields — consumed by admin portal AnalyticsPage AgentCostTable + KPI card
-        "cost_usd_today":       get_daily_cost(today),
-        "agents_cost":          get_agent_costs(today),
+        "cost_usd_today":       get_daily_cost(today, brand_hash=brand_hash),
+        "agents_cost":          get_agent_costs(today, brand_hash=brand_hash),
         "generated_at":         datetime.utcnow().isoformat(),
     }
 
@@ -414,7 +433,7 @@ def _lead_row(uid: str) -> dict:
     }
 
 
-@router.get("/admin/leads", dependencies=[Depends(verify_api_key)])
+@router.get("/admin/leads")
 async def admin_leads(
     stage: str = "",
     area: str = "",
@@ -423,13 +442,14 @@ async def admin_leads(
     q: str = "",
     offset: int = 0,
     limit: int = 25,
+    brand_hash: str = Depends(require_admin_brand_key),
 ):
     """Return paginated, filterable lead list sorted by recency."""
     cutoff_ts = _time.time() - (days_since_active * 86400) if days_since_active else 0
 
-    # Pull a larger batch from the sorted set so we can filter in Python
+    # Pull a larger batch from the brand's sorted set so we can filter in Python
     batch_size = max(limit * 4, 200)
-    uids = get_active_users(offset=0, limit=batch_size)
+    uids = get_brand_active_users(brand_hash, offset=0, limit=batch_size)
 
     rows = []
     for uid in uids:
@@ -471,18 +491,19 @@ async def admin_leads(
     total = len(rows)
     page  = rows[offset: offset + limit]
 
-    # Persist enriched snapshot to PostgreSQL (fire-and-forget)
+    # Persist enriched snapshot to PostgreSQL (fire-and-forget, brand-scoped)
     if rows:
-        asyncio.create_task(pg.upsert_leads(rows))
+        asyncio.create_task(pg.upsert_leads(rows, brand_hash=brand_hash))
 
     return {"leads": page, "total": total, "offset": offset, "limit": limit}
 
 
-@router.get("/admin/leads/{uid}", dependencies=[Depends(verify_api_key)])
-async def admin_lead_detail(uid: str):
+@router.get("/admin/leads/{uid}")
+async def admin_lead_detail(uid: str, brand_hash: str = Depends(require_admin_brand_key)):
     """Return the full 25-field profile for a single lead."""
+    _require_ownership(uid, brand_hash)
     row = _lead_row(uid)
-    asyncio.create_task(pg.upsert_leads([row]))
+    asyncio.create_task(pg.upsert_leads([row], brand_hash=brand_hash))
     return row
 
 
@@ -490,29 +511,28 @@ async def admin_lead_detail(uid: str):
 # Feature flags
 # ---------------------------------------------------------------------------
 
-@router.get("/admin/flags", dependencies=[Depends(verify_api_key)])
-async def admin_get_flags():
-    """Return current feature flag states."""
-    return {
-        "DYNAMIC_SKILLS_ENABLED": settings.DYNAMIC_SKILLS_ENABLED,
-        "KYC_ENABLED":            settings.KYC_ENABLED,
-        "PAYMENT_REQUIRED":       settings.PAYMENT_REQUIRED,
-        "WEB_SEARCH_ENABLED":     bool(settings.TAVILY_API_KEY),
-    }
+@router.get("/admin/flags")
+async def admin_get_flags(brand_hash: str = Depends(require_admin_brand_key)):
+    """Return effective feature flag states (per-brand overrides merged over global defaults)."""
+    from db.redis_store import get_effective_flags
+    flags = get_effective_flags(brand_hash)
+    flags["WEB_SEARCH_ENABLED"] = bool(settings.TAVILY_API_KEY)  # always global, read-only
+    return flags
 
 
-# Mutable flags that can be toggled at runtime (in-memory; restart resets to env).
+# Mutable flags that can be toggled per-brand (persisted in Redis).
 _MUTABLE_FLAGS = {"DYNAMIC_SKILLS_ENABLED", "KYC_ENABLED", "PAYMENT_REQUIRED"}
 
 
-@router.post("/admin/flags", dependencies=[Depends(verify_api_key)])
-async def admin_set_flags(request: Request):
-    """Update runtime feature flags (in-memory only; restart resets to env values).
+@router.post("/admin/flags")
+async def admin_set_flags(request: Request, brand_hash: str = Depends(require_admin_brand_key)):
+    """Update per-brand feature flags (persisted in Redis per brand).
 
     Accepts both payload formats:
       - { "key": "FLAG_NAME", "value": bool }  (frontend sends this)
       - { "FLAG_NAME": bool }                  (direct API usage)
     """
+    from db.redis_store import set_brand_flag, get_effective_flags
     body = await request.json()
 
     # Support both: { KEY: value } and { key: "KEY", value: bool }
@@ -524,10 +544,11 @@ async def admin_set_flags(request: Request):
     changed = {}
     for flag in _MUTABLE_FLAGS:
         if flag in updates and updates[flag] is not None:
-            setattr(settings, flag, bool(updates[flag]))
-            changed[flag] = getattr(settings, flag)
+            set_brand_flag(brand_hash, flag, bool(updates[flag]))
+            changed[flag] = bool(updates[flag])
 
-    return {"ok": True, "changed": changed}
+    # Return all effective flags so frontend reflects the merged state
+    return {"ok": True, "changed": changed, "effective": get_effective_flags(brand_hash)}
 
 
 # ---------------------------------------------------------------------------
@@ -585,16 +606,16 @@ class BroadcastRequest(BaseModel):
     message: str
 
 
-@router.post("/admin/broadcast", dependencies=[Depends(verify_api_key)])
-async def admin_broadcast(req: BroadcastRequest):
-    """Send a text message to all users active in the last 7 days."""
+@router.post("/admin/broadcast")
+async def admin_broadcast(req: BroadcastRequest, brand_hash: str = Depends(require_admin_brand_key)):
+    """Send a text message to all brand users active in the last 7 days."""
     cutoff = _time.time() - 7 * 86400
-    uids = get_active_users(offset=0, limit=500)
+    uids = get_brand_active_users(brand_hash, offset=0, limit=500)
 
     sent = 0
     for uid in uids:
         try:
-            score = _r().zscore("active_users", uid)
+            score = _r().zscore(f"active_users:{brand_hash}", uid)
             if score and float(score) < cutoff:
                 continue
             await send_text(uid, req.message)
@@ -609,9 +630,13 @@ async def admin_broadcast(req: BroadcastRequest):
 # Property documents
 # ---------------------------------------------------------------------------
 
-@router.get("/admin/properties", dependencies=[Depends(verify_api_key)])
-async def admin_list_properties():
-    """Return all known properties (from Redis property_info_map cache)."""
+@router.get("/admin/properties")
+async def admin_list_properties(brand_hash: str = Depends(require_admin_brand_key)):
+    """Return properties belonging to this brand (from Redis property_info_map cache)."""
+    # Determine which pg_ids belong to this brand
+    brand_cfg = get_brand_config_by_hash(brand_hash) or {}
+    brand_pg_ids = set(brand_cfg.get("pg_ids", []))
+
     try:
         raw = _r().get("property_info_map")
         if not raw:
@@ -619,6 +644,9 @@ async def admin_list_properties():
         prop_map = _json_module.loads(raw)
         props = []
         for pid, info in prop_map.items():
+            # Only show properties belonging to this brand
+            if brand_pg_ids and pid not in brand_pg_ids:
+                continue
             props.append({
                 "id":   pid,
                 "name": info.get("pg_name") or info.get("name") or pid,
@@ -630,9 +658,18 @@ async def admin_list_properties():
         return {"properties": []}
 
 
-@router.get("/admin/properties/{prop_id}/documents", dependencies=[Depends(verify_api_key)])
-async def admin_get_documents(prop_id: str):
+def _require_property_ownership(prop_id: str, brand_hash: str) -> None:
+    """Raise 403 if prop_id is not in the brand's pg_ids list."""
+    brand_cfg = get_brand_config_by_hash(brand_hash) or {}
+    brand_pg_ids = brand_cfg.get("pg_ids", [])
+    if brand_pg_ids and prop_id not in brand_pg_ids:
+        raise HTTPException(status_code=403, detail="Property not in your brand")
+
+
+@router.get("/admin/properties/{prop_id}/documents")
+async def admin_get_documents(prop_id: str, brand_hash: str = Depends(require_admin_brand_key)):
     """Return document metadata for a property."""
+    _require_property_ownership(prop_id, brand_hash)
     docs = await pg.get_property_documents(prop_id)
     return {"documents": docs}
 
@@ -644,9 +681,10 @@ class UploadDocResponse(BaseModel):
     uploaded_at: str
 
 
-@router.post("/admin/properties/{prop_id}/documents", dependencies=[Depends(verify_api_key)])
-async def admin_upload_document(prop_id: str, file: UploadFile = File(...)):
+@router.post("/admin/properties/{prop_id}/documents")
+async def admin_upload_document(prop_id: str, file: UploadFile = File(...), brand_hash: str = Depends(require_admin_brand_key)):
     """Upload a knowledge document (PDF, XLSX, CSV, TXT) for a property."""
+    _require_property_ownership(prop_id, brand_hash)
     ALLOWED = {"pdf", "xlsx", "csv", "txt"}
     MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 
@@ -693,9 +731,10 @@ async def admin_upload_document(prop_id: str, file: UploadFile = File(...)):
     return doc
 
 
-@router.delete("/admin/properties/{prop_id}/documents/{doc_id}", dependencies=[Depends(verify_api_key)])
-async def admin_delete_document(prop_id: str, doc_id: int):
+@router.delete("/admin/properties/{prop_id}/documents/{doc_id}")
+async def admin_delete_document(prop_id: str, doc_id: int, brand_hash: str = Depends(require_admin_brand_key)):
     """Delete a property document."""
+    _require_property_ownership(prop_id, brand_hash)
     deleted = await pg.delete_property_document(prop_id, doc_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -706,32 +745,52 @@ async def admin_delete_document(prop_id: str, doc_id: int):
 # Backfill utility
 # ---------------------------------------------------------------------------
 
-@router.post("/admin/backfill-users", dependencies=[Depends(verify_api_key)])
-async def admin_backfill_users():
-    """One-time backfill: populate active_users sorted set from existing conversation keys.
+@router.post("/admin/backfill-brands")
+async def admin_backfill_brands(brand_hash: str = Depends(require_admin_brand_key)):
+    """One-time backfill: tag all existing users with this brand and populate
+    the brand-scoped active_users sorted set.
 
-    Safe to call multiple times — ZADD NX only adds entries that don't exist yet.
-    Returns count of users added.
+    Safe to call multiple times — idempotent writes.
+
+    How it works:
+      1. Scans the global active_users sorted set (all existing users).
+      2. For each user, checks if they already have a brand tag.
+      3. If untagged (legacy user), assigns them to the calling admin's brand.
+      4. Users already tagged with a different brand are skipped.
     """
+    from db.redis_store import set_user_brand, add_to_brand_active_users
+
     try:
         r = _r()
-        added = 0
-        # Scan for all conversation keys
-        cursor = 0
-        while True:
-            cursor, keys = r.scan(cursor, match="*:conversation", count=200)
-            for key in keys:
-                key_str = key if isinstance(key, str) else key.decode()
-                uid = key_str.replace(":conversation", "")
-                if not uid:
-                    continue
-                # Use NX so we don't overwrite entries already added by save_conversation()
-                result = r.zadd("active_users", {uid: _time.time()}, nx=True)
-                added += int(result or 0)
-            if cursor == 0:
-                break
-        total = r.zcard("active_users")
-        return {"ok": True, "added": added, "total_in_set": total}
+        tagged = 0
+        skipped = 0
+        already_tagged = 0
+
+        # Iterate all users in the global sorted set
+        all_uids = get_active_users(offset=0, limit=5000)
+        for uid in all_uids:
+            existing_brand = get_user_brand(uid)
+            if existing_brand == brand_hash:
+                # Already tagged with this brand
+                already_tagged += 1
+                continue
+            if existing_brand:
+                # Tagged with a different brand — skip
+                skipped += 1
+                continue
+            # Untagged legacy user — assign to calling brand
+            set_user_brand(uid, brand_hash)
+            add_to_brand_active_users(uid, brand_hash)
+            tagged += 1
+
+        total = get_brand_active_users_count(brand_hash)
+        return {
+            "ok": True,
+            "tagged": tagged,
+            "already_tagged": already_tagged,
+            "skipped_other_brand": skipped,
+            "total_in_brand": total,
+        }
     except Exception as exc:
         return JSONResponse(
             status_code=500,

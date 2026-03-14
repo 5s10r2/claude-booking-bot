@@ -146,15 +146,27 @@ from db.redis.payment import (  # noqa: F401
 from db.redis.brand import (  # noqa: F401
     _brand_hash,
     get_brand_config,
+    get_brand_config_by_hash,
     set_brand_config,
     get_brand_wa_config,
     get_brand_by_token,
+    # Per-brand feature flags
+    get_brand_flags,
+    set_brand_flag,
+    get_effective_flags,
 )
 
 # Admin domain
 from db.redis.admin import (  # noqa: F401
     get_active_users,
     get_active_users_count,
+    # Brand user tagging + per-brand user enumeration
+    set_user_brand,
+    get_user_brand,
+    add_to_brand_active_users,
+    get_brand_active_users,
+    get_brand_active_users_count,
+    # Human mode
     get_human_mode,
     set_human_mode,
     clear_human_mode,

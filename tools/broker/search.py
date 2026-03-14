@@ -20,6 +20,7 @@ from db.redis_store import (
     record_property_viewed,
     update_user_memory,
     get_user_memory,
+    get_user_brand,
     _r as _redis,
 )
 from utils.api import parse_amenities, parse_sharing_types
@@ -438,7 +439,7 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     ])
 
     save_property_template(user_id, property_template[:5])
-    track_funnel(user_id, "search")
+    track_funnel(user_id, "search", brand_hash=get_user_brand(user_id))
 
     # Update cross-session memory
     for info in property_template[:5]:

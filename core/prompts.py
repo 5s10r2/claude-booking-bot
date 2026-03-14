@@ -566,12 +566,24 @@ You MUST respond in {language_name}. The user is communicating in {language_name
 """
 
 
-def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> str:
+def format_prompt(
+    prompt_template: str,
+    *,
+    language: str = "en",
+    payment_required: bool | None = None,
+    kyc_enabled: bool | None = None,
+    **kwargs,
+) -> str:
     """Fill in prompt parameters. Missing keys are left as empty strings.
 
     The special ``language`` kwarg builds and injects the
     ``{language_directive}`` block so every agent prompt gets an explicit
     language instruction.
+
+    Per-brand flag overrides (``payment_required``, ``kyc_enabled``) take
+    precedence over the global ``settings.*`` values when provided.  This
+    enables multi-brand flag isolation without changing the global in-memory
+    state.
 
     Feature-flag-driven template vars are injected automatically:
     - ``{kyc_reservation_flow}`` — 4-branch booking workflow (KYC_ENABLED × PAYMENT_REQUIRED)
@@ -580,6 +592,10 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
     - ``{post_visit_reserve_cta}`` — post-visit reservation CTA text
     """
     from config import settings  # local import to avoid circular dependency
+
+    # Resolve effective flag values: per-brand overrides > global defaults
+    _payment = payment_required if payment_required is not None else settings.PAYMENT_REQUIRED
+    _kyc = kyc_enabled if kyc_enabled is not None else settings.KYC_ENABLED
 
     # Build the language directive block
     lang_name = LANGUAGE_NAMES.get(language, "English")
@@ -595,28 +611,28 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
     # ── Feature-flag-driven template vars ─────────────────────────────────
 
     # {reserve_option} — booking menu option 4
-    if settings.PAYMENT_REQUIRED:
+    if _payment:
         reserve_option = "4. Reserve with Token — pay token amount to reserve bed/room"
     else:
         reserve_option = "4. Reserve — reserve a bed/room directly"
     prompt_template = prompt_template.replace("{reserve_option}", reserve_option)
 
     # {token_value_line} — token selling point (used in broker VALUE FRAMING + selling.md)
-    if settings.PAYMENT_REQUIRED:
+    if _payment:
         token_value_line = '- If token amount is low: "Just ₹[amount] to reserve — fully adjustable against rent"'
     else:
         token_value_line = ""
     prompt_template = prompt_template.replace("{token_value_line}", token_value_line)
 
     # {post_visit_reserve_cta} — post-visit positive feedback CTA
-    if settings.PAYMENT_REQUIRED:
+    if _payment:
         post_visit_reserve_cta = "Want me to help you reserve a bed at [property]? Just a small token locks it in."
     else:
         post_visit_reserve_cta = "Want me to help you reserve a bed at [property]? I can lock it in for you right away."
     prompt_template = prompt_template.replace("{post_visit_reserve_cta}", post_visit_reserve_cta)
 
     # {kyc_reservation_flow} — 4-branch booking workflow
-    if not settings.PAYMENT_REQUIRED and not settings.KYC_ENABLED:
+    if not _payment and not _kyc:
         # Direct reservation (simplest path)
         kyc_reservation_flow = (
             "Step 2: RESERVATION\n"
@@ -627,7 +643,7 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
             "If the user asks about payment or tokens, explain that no payment is needed — "
             "reservation is free and they can proceed directly."
         )
-    elif not settings.PAYMENT_REQUIRED and settings.KYC_ENABLED:
+    elif not _payment and _kyc:
         # KYC → Reserve (no payment)
         kyc_reservation_flow = (
             "Step 2: Call fetch_kyc_status\n"
@@ -655,7 +671,7 @@ def format_prompt(prompt_template: str, *, language: str = "en", **kwargs) -> st
             "NEVER skip steps. NEVER call reserve_bed without completing KYC first.\n"
             "Payment is not required for this brand."
         )
-    elif settings.PAYMENT_REQUIRED and settings.KYC_ENABLED:
+    elif _payment and _kyc:
         # Full flow: KYC → Payment → Reserve
         kyc_reservation_flow = (
             "Step 2: Call fetch_kyc_status\n"

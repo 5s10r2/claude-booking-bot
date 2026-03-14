@@ -1,7 +1,7 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_property_info_map, set_property_info_map, track_funnel
+from db.redis_store import get_property_info_map, set_property_info_map, track_funnel, get_user_brand
 from utils.api import check_rentok_response, parse_amenities
 from utils.properties import find_property as _find_property
 
@@ -170,7 +170,7 @@ async def fetch_property_details(user_id: str, property_name: str, **kwargs) -> 
             p.update({k: v for k, v in details.items() if v})
             break
     set_property_info_map(user_id, info_map)
-    track_funnel(user_id, "detail")
+    track_funnel(user_id, "detail", brand_hash=get_user_brand(user_id))
 
     result = f"PROPERTY DETAILS: {details['property_name']}\n"
     for key, val in details.items():

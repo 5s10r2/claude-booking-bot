@@ -22,6 +22,7 @@ from db.redis_store import (
     track_agent_usage,
     track_skill_usage,
     update_persona,
+    get_user_brand,
 )
 from agents import supervisor, broker_agent, booking_agent, profile_agent, default_agent
 
@@ -30,11 +31,14 @@ logger = get_logger("pipeline")
 
 async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     """Run the full supervisor → agent pipeline. Returns (response, agent_name, language)."""
+    # Resolve brand_hash once for all downstream calls
+    brand_hash = get_user_brand(user_id)
+
     # Human takeover bypass — admin is handling this user manually
-    if get_human_mode(user_id):
+    if get_human_mode(user_id, brand_hash=brand_hash):
         conv = get_conversation(user_id)
         conv.append({"role": "user", "content": message})
-        save_conversation(user_id, conv)
+        save_conversation(user_id, conv, brand_hash=brand_hash)
         return "", "human", get_user_language(user_id) or "en"
 
     # Update cross-session memory (only bump session_count on first message of a session)
@@ -56,7 +60,7 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
         set_user_language(user_id, detected_lang)
 
     # Load conversation history + summarize if needed
-    messages = await state.conversation.add_user_message_with_summary(user_id, message)
+    messages = await state.conversation.add_user_message_with_summary(user_id, message, brand_hash=brand_hash)
 
     # SKILL RESOLUTION ORDER (broker agent only):
     # 1. Supervisor LLM classifies → {"agent": str, "skills": list[str]}
@@ -80,10 +84,10 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
 
     logger.info("user=%s agent=%s lang=%s msg=%s", user_id, agent_name, language, message[:60])
 
-    # Track agent usage + skill usage for analytics
-    track_agent_usage(user_id, agent_name)
+    # Track agent usage + skill usage for analytics (brand-scoped)
+    track_agent_usage(user_id, agent_name, brand_hash=brand_hash)
     if skills:
-        track_skill_usage(skills)
+        track_skill_usage(skills, brand_hash=brand_hash)
 
     # Step 2: Run selected agent (with language + skills for broker)
     if agent_name == "broker":
@@ -101,7 +105,7 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     set_last_agent(user_id, agent_name)
 
     # Save assistant response to history
-    state.conversation.add_assistant_message(user_id, response)
+    state.conversation.add_assistant_message(user_id, response, brand_hash=brand_hash)
 
     return response, agent_name, language
 
@@ -119,7 +123,9 @@ async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict], str
     if detected_lang != "en":
         set_user_language(user_id, detected_lang)
 
-    messages = await state.conversation.add_user_message_with_summary(user_id, message)
+    # Resolve brand_hash for conversation save
+    brand_hash = get_user_brand(user_id)
+    messages = await state.conversation.add_user_message_with_summary(user_id, message, brand_hash=brand_hash)
 
     route_result = await supervisor.route(state.engine, messages)
     agent_name = route_result["agent"]
@@ -136,10 +142,10 @@ async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict], str
         from skills.skill_map import detect_skills_heuristic
         skills = detect_skills_heuristic(message)
 
-    # Track agent usage + skill usage for analytics
-    track_agent_usage(user_id, agent_name)
+    # Track agent usage + skill usage for analytics (brand-scoped)
+    track_agent_usage(user_id, agent_name, brand_hash=brand_hash)
     if skills:
-        track_skill_usage(skills)
+        track_skill_usage(skills, brand_hash=brand_hash)
 
     logger.info("user=%s agent=%s lang=%s skills=%s msg=%s", user_id, agent_name, language, skills, message[:60])
     return agent_name, messages, language, skills

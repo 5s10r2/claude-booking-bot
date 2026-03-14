@@ -34,6 +34,11 @@ def get_config(user_id: str, language: str = "en", skills: list[str] | None = No
     account = get_account_values(user_id)
     returning_ctx = build_returning_user_context(user_id)
 
+    # Resolve per-brand feature flags
+    from db.redis_store import get_user_brand, get_effective_flags
+    brand_hash = get_user_brand(user_id)
+    flags = get_effective_flags(brand_hash)
+
     template_vars = dict(
         language=language,
         brand_name=account.get("brand_name", "our platform"),
@@ -42,10 +47,12 @@ def get_config(user_id: str, language: str = "en", skills: list[str] | None = No
         today_date=today_date(),
         current_day=current_day(),
         returning_user_context=returning_ctx,
+        payment_required=flags.get("PAYMENT_REQUIRED"),
+        kyc_enabled=flags.get("KYC_ENABLED"),
     )
 
     # ── Legacy path: monolithic prompt (feature flag OFF) ──────────────
-    if not settings.DYNAMIC_SKILLS_ENABLED:
+    if not flags.get("DYNAMIC_SKILLS_ENABLED", settings.DYNAMIC_SKILLS_ENABLED):
         system_prompt = format_prompt(BROKER_AGENT_PROMPT, **template_vars)
         tools = get_schemas_for_agent("broker")
         executor = ToolExecutor()

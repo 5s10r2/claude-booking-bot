@@ -16,6 +16,12 @@ def get_config(user_id: str, language: str = "en") -> dict:
     """Return agent setup for use by both run() and streaming endpoint."""
     account = get_account_values(user_id)
     returning_user_context = build_returning_user_context(user_id)
+
+    # Resolve per-brand feature flags
+    from db.redis_store import get_user_brand, get_effective_flags
+    brand_hash = get_user_brand(user_id)
+    flags = get_effective_flags(brand_hash)
+
     system_prompt = format_prompt(
         BOOKING_AGENT_PROMPT,
         language=language,
@@ -25,6 +31,8 @@ def get_config(user_id: str, language: str = "en") -> dict:
         today_date=today_date(),
         current_day=current_day(),
         returning_user_context=returning_user_context,
+        payment_required=flags.get("PAYMENT_REQUIRED"),
+        kyc_enabled=flags.get("KYC_ENABLED"),
     )
     tools = get_schemas_for_agent("booking")
     executor = ToolExecutor()

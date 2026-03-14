@@ -13,7 +13,7 @@ as the Redis key prefix.
 import hashlib
 import json
 
-from db.redis._base import _r, _json_get
+from db.redis._base import _r, _json_get, _json_set
 
 
 def _brand_hash(api_key: str) -> str:
@@ -26,9 +26,15 @@ def get_brand_config(api_key: str):
     return _json_get(f"brand_config:{_brand_hash(api_key)}")
 
 
+def get_brand_config_by_hash(brand_hash: str):
+    """Return brand config dict by hash (admin endpoints only have hash, not raw key)."""
+    return _json_get(f"brand_config:{brand_hash}")
+
+
 def set_brand_config(api_key: str, config: dict) -> None:
     """Atomically write brand_config, brand_wa reverse-lookup, and brand_token."""
     brand_hash = _brand_hash(api_key)
+    config["brand_hash"] = brand_hash  # store hash inside config for reverse-lookups
     config_str = json.dumps(config, default=str)
     pipe = _r().pipeline()
     pipe.set(f"brand_config:{brand_hash}", config_str)
@@ -50,3 +56,36 @@ def get_brand_by_token(token: str):
     if not brand_hash:
         return None
     return _json_get(f"brand_config:{brand_hash.decode()}")
+
+
+# ---------------------------------------------------------------------------
+# Per-brand feature flags (Phase 2 — brand-scoped flag overrides)
+# ---------------------------------------------------------------------------
+
+def get_brand_flags(brand_hash: str) -> dict:
+    """Return per-brand flag overrides, or empty dict if none set."""
+    return _json_get(f"brand_flags:{brand_hash}", default={})
+
+
+def set_brand_flag(brand_hash: str, flag: str, value: bool) -> None:
+    """Set a single per-brand flag override."""
+    flags = get_brand_flags(brand_hash)
+    flags[flag] = value
+    _json_set(f"brand_flags:{brand_hash}", flags)
+
+
+def get_effective_flags(brand_hash: str | None = None) -> dict:
+    """Merge brand overrides over global defaults. Returns all flag values.
+
+    Priority: per-brand override > global setting (from config.py / env).
+    """
+    from config import settings
+    defaults = {
+        "DYNAMIC_SKILLS_ENABLED": settings.DYNAMIC_SKILLS_ENABLED,
+        "KYC_ENABLED": settings.KYC_ENABLED,
+        "PAYMENT_REQUIRED": settings.PAYMENT_REQUIRED,
+    }
+    if brand_hash:
+        overrides = get_brand_flags(brand_hash)
+        defaults.update(overrides)
+    return defaults

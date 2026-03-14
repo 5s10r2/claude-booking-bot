@@ -23,6 +23,7 @@ from db.redis_store import (
     set_response,
 )
 from db.postgres import insert_message
+from db.redis_store import get_user_brand
 from utils.image import upload_media_from_url
 
 
@@ -70,7 +71,7 @@ async def send_text(user_id: str, message: str) -> dict:
         "text": {"body": message},
     }
 
-    # Persist to DB
+    # Persist to DB (brand-scoped)
     pg_ids = get_whitelabel_pg_ids(user_id)
     await insert_message(
         thread_id=recipient,
@@ -80,6 +81,7 @@ async def send_text(user_id: str, message: str) -> dict:
         platform_type="whatsapp",
         is_template=False,
         pg_ids=str(pg_ids),
+        brand_hash=get_user_brand(user_id),
     )
 
     try:
@@ -229,7 +231,7 @@ async def send_carousel(user_id: str, property_template: list) -> dict:
         },
     }
 
-    # Persist to DB
+    # Persist to DB (brand-scoped)
     pg_ids = get_whitelabel_pg_ids(user_id)
     await insert_message(
         thread_id=recipient,
@@ -239,6 +241,7 @@ async def send_carousel(user_id: str, property_template: list) -> dict:
         platform_type="whatsapp",
         is_template=True,
         pg_ids=str(pg_ids),
+        brand_hash=get_user_brand(user_id),
     )
 
     try:

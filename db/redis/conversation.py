@@ -31,7 +31,7 @@ def get_conversation(user_id: str) -> list[dict]:
     return json.loads(raw)
 
 
-def save_conversation(user_id: str, messages: list[dict]) -> None:
+def save_conversation(user_id: str, messages: list[dict], brand_hash: str | None = None) -> None:
     # Allow more messages when a summary is present (summary compresses older context)
     limit = settings.CONVERSATION_HISTORY_LIMIT * 2  # default: 40
     if messages and "[CONVERSATION_SUMMARY]" in str(messages[0].get("content", "")):
@@ -44,6 +44,11 @@ def save_conversation(user_id: str, messages: list[dict]) -> None:
     )
     # Track user in active_users sorted set (score = unix timestamp for recency ordering)
     _r().zadd("active_users", {user_id: time.time()})
+    # Also track in brand-scoped sorted set if brand_hash is known
+    if brand_hash:
+        from db.redis.admin import add_to_brand_active_users, set_user_brand
+        add_to_brand_active_users(user_id, brand_hash)
+        set_user_brand(user_id, brand_hash)
 
 
 def clear_conversation(user_id: str) -> None:

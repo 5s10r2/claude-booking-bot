@@ -56,9 +56,10 @@ class AnthropicEngine:
             if response.stop_reason == "end_turn":
                 # Fire-and-forget cost tracking (non-blocking) — mirrors streaming path
                 try:
-                    from db.redis_store import increment_session_cost
+                    from db.redis_store import increment_session_cost, get_user_brand
                     from db.redis.analytics import increment_agent_cost, increment_daily_cost
                     usage = response.usage
+                    _bh = get_user_brand(user_id)
                     asyncio.create_task(asyncio.to_thread(
                         increment_session_cost, user_id,
                         usage.input_tokens, usage.output_tokens, model,
@@ -68,9 +69,11 @@ class AnthropicEngine:
                     asyncio.create_task(asyncio.to_thread(
                         increment_agent_cost, agent_name,
                         usage.input_tokens, usage.output_tokens, turn_cost,
+                        brand_hash=_bh,
                     ))
                     asyncio.create_task(asyncio.to_thread(
                         increment_daily_cost, turn_cost,
+                        brand_hash=_bh,
                     ))
                 except Exception:
                     pass  # intentional: metrics are best-effort
@@ -227,9 +230,10 @@ class AnthropicEngine:
             if response.stop_reason == "end_turn":
                 # Fire-and-forget cost tracking (non-blocking)
                 try:
-                    from db.redis_store import increment_session_cost
+                    from db.redis_store import increment_session_cost, get_user_brand
                     from db.redis.analytics import increment_agent_cost, increment_daily_cost
                     usage = response.usage
+                    _bh = get_user_brand(user_id)
                     # Per-user rolling session cost (7-day TTL)
                     asyncio.create_task(asyncio.to_thread(
                         increment_session_cost, user_id,
@@ -241,9 +245,11 @@ class AnthropicEngine:
                     asyncio.create_task(asyncio.to_thread(
                         increment_agent_cost, agent_name,
                         usage.input_tokens, usage.output_tokens, turn_cost,
+                        brand_hash=_bh,
                     ))
                     asyncio.create_task(asyncio.to_thread(
                         increment_daily_cost, turn_cost,
+                        brand_hash=_bh,
                     ))
                 except Exception:
                     pass  # intentional: metrics are best-effort

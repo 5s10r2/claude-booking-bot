@@ -10,6 +10,7 @@ from db.redis_store import (
     get_aadhar_user_name,
     schedule_followup,
     cancel_followups,
+    get_user_brand,
 )
 from utils.api import check_rentok_response, RentokAPIError
 from utils.properties import find_property as _find_property
@@ -203,7 +204,7 @@ async def verify_payment(user_id: str, **kwargs) -> str:
 
     # Always clear state — payment is recorded regardless of CRM status
     clear_payment_info(user_id)
-    track_funnel(user_id, "booking")
+    track_funnel(user_id, "booking", brand_hash=get_user_brand(user_id))
     cancel_followups(user_id, "payment_pending")
 
     if eazypg_id and not lead_token_ok:

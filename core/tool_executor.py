@@ -82,10 +82,10 @@ class ToolExecutor:
                     "Skill miss: tool '%s' not in filtered set — expanding from fallback",
                     tool_name,
                 )
-                # Track the miss for monitoring
+                # Track the miss for monitoring (brand-scoped)
                 try:
-                    from db.redis_store import track_skill_miss
-                    track_skill_miss(tool_name)
+                    from db.redis_store import track_skill_miss, get_user_brand
+                    track_skill_miss(tool_name, brand_hash=get_user_brand(user_id))
                 except Exception:
                     pass  # Non-blocking — don't break tool execution
                 # Register for subsequent calls in this turn

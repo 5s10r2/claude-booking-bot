@@ -34,3 +34,19 @@ async def require_brand_api_key(api_key: str = Security(_api_key_header)) -> str
     if not api_key:
         raise HTTPException(status_code=401, detail="X-API-Key header required")
     return api_key
+
+
+async def require_admin_brand_key(api_key: str = Security(_api_key_header)) -> str:
+    """Admin auth: validates key has a brand_config entry, returns 16-char brand_hash.
+
+    Every admin endpoint uses this instead of verify_api_key(). The admin frontend
+    sends X-API-Key with every request; each brand's unique key (e.g. OxOtel1234)
+    scopes that admin to their brand's data only.
+    """
+    if not api_key:
+        raise HTTPException(status_code=401, detail="X-API-Key header required")
+    from db.redis.brand import _brand_hash, get_brand_config
+    bh = _brand_hash(api_key)
+    if not get_brand_config(api_key):
+        raise HTTPException(status_code=403, detail="No brand configured for this API key")
+    return bh

@@ -232,6 +232,8 @@ async def whatsapp_webhook(request: Request):
 
     # Persist incoming message immediately (before any queuing)
     pg_ids_val = request.query_params.get("pg_ids", "")
+    from db.redis_store import get_user_brand as _gub_wa
+    _wa_bh = _gub_wa(user_phone)
     await pg.insert_message(
         thread_id=user_phone,
         user_phone=user_phone,
@@ -240,6 +242,7 @@ async def whatsapp_webhook(request: Request):
         platform_type="whatsapp",
         is_template=False,
         pg_ids=pg_ids_val,
+        brand_hash=_wa_bh,
     )
 
     # Hydrate brand config from WhatsApp phone_number_id
@@ -256,8 +259,18 @@ async def whatsapp_webhook(request: Request):
                 "is_meta": brand_cfg.get("is_meta", True),
                 "brand_name": brand_cfg.get("brand_name", ""),
             }
-            # Write with 1-hour TTL so stale creds don't linger
-            _json_set(f"{user_phone}:account_values", hydrated, ex=3600)
+            # Persist account_values WITHOUT short TTL (Gap 1 fix)
+            # WA creds rarely change; next incoming message refreshes them.
+            # Previous ex=3600 caused silent failures for admin messages,
+            # broadcasts, and follow-ups after 1 hour of user inactivity.
+            _json_set(f"{user_phone}:account_values", hydrated)
+
+            # Tag WhatsApp user with brand for multi-brand isolation
+            brand_hash_val = brand_cfg.get("brand_hash")
+            if brand_hash_val:
+                from db.redis_store import set_user_brand, add_to_brand_active_users
+                set_user_brand(user_phone, brand_hash_val)
+                add_to_brand_active_users(user_phone, brand_hash_val)
 
     # ── Queue + debounce ────────────────────────────────────────────────────
     # Push message text onto the per-user Redis queue.
@@ -297,7 +310,8 @@ async def payment_webhook(request: Request):
     if status == "success":
         # Notify user that payment was confirmed
         notification = "Payment confirmed for your property reservation. Your booking is being processed."
-        state.conversation.add_assistant_message(user_id, notification)
+        from db.redis_store import get_user_brand as _get_ub
+        state.conversation.add_assistant_message(user_id, notification, brand_hash=_get_ub(user_id))
 
         # Send notification via WhatsApp if config exists
         account = get_account_values(user_id)
@@ -382,9 +396,10 @@ async def process_followups():
                     logger.info("follow-up skipped (no WA config): user=%s type=%s", user_id, ftype)
             else:
                 # Web chat user — store message for next session retrieval
+                from db.redis_store import get_user_brand as _get_ub_fu
                 conv = get_conversation(user_id)
                 conv.append({"role": "assistant", "content": f"[FOLLOW_UP] {message}"})
-                save_conversation(user_id, conv)
+                save_conversation(user_id, conv, brand_hash=_get_ub_fu(user_id))
                 processed += 1
 
             complete_followup(raw)
