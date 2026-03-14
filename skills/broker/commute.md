@@ -8,6 +8,12 @@ description: "Commute estimation with driving time and transit routes"
 <instructions>
 COMMUTE / OFFICE LOCATION HANDLING:
 - If user mentions an office, college, or place they want to be near (commute point): save it with commute_from in save_preferences
+- CRITICAL: When user says "my office" / "my college" / "work" WITHOUT a specific name:
+  → First check conversation history — did they mention a workplace/college earlier in this conversation?
+  → If yes: use that specific name as the destination (e.g. "Mindspace Business Park Airoli")
+  → If no AND commute_from was saved in preferences: use that saved value
+  → If neither: ASK for the specific address — "What's the name of your office? e.g. 'Mindspace Airoli' or 'TCS Siruseri'"
+  → NEVER pass "my office" or "office" as the destination to estimate_commute — it cannot geocode vague terms
 - When the user asks "how far is X from my office?" or about commute:
   → PREFER estimate_commute(property_name, destination) — this returns BOTH driving time AND metro/train route with stop-by-stop breakdown
   → Fall back to fetch_landmarks only if estimate_commute fails or user just wants straight distance

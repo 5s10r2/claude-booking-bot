@@ -1,3 +1,4 @@
+import asyncio
 import json
 import math
 import os
@@ -48,6 +49,14 @@ DEFAULT_STATION_RADIUS_M = 2000
 OVERPASS_TIMEOUT_S = 15
 METRO_INTER_STATION_KM = 1.5
 RAIL_INTER_STATION_KM = 2.5
+COMMUTE_AGGREGATE_TIMEOUT_S = 30
+
+# Destinations that are too vague for geocoding — ask for specifics
+_VAGUE_DESTINATIONS = frozenset({
+    "my office", "office", "work", "my work", "workplace", "my workplace",
+    "my college", "college", "school", "my school", "university", "my university",
+    "my place", "home", "my home",
+})
 
 # ---------------------------------------------------------------------------
 # Transit line data (loaded once)
@@ -213,12 +222,49 @@ async def fetch_landmarks(user_id: str, landmark_name: str, property_name: str, 
 
 
 # ---------------------------------------------------------------------------
-# Tool: estimate_commute (NEW — driving + transit estimate)
+# Tool: estimate_commute (driving + transit estimate)
 # ---------------------------------------------------------------------------
 async def estimate_commute(
     user_id: str, property_name: str, destination: str, city: str = "", **kwargs
 ) -> str:
-    """Estimate commute from a property to a destination via car AND public transit."""
+    """Estimate commute from a property to a destination via car AND public transit.
+
+    Wraps the actual computation in a 30-second aggregate timeout to prevent
+    stacking of slow external API calls (geocode + OSRM + Overpass) from
+    causing 120s+ hangs.
+    """
+    # Early exit for vague destinations that can't be geocoded
+    dest_lower = destination.strip().lower()
+    if dest_lower in _VAGUE_DESTINATIONS:
+        return (
+            f"I need a specific address to calculate the commute. "
+            f"Could you share the name of your office/college? "
+            f"For example: 'Mindspace Business Park, Airoli' or 'IIT Bombay, Powai'"
+        )
+
+    try:
+        return await asyncio.wait_for(
+            _estimate_commute_inner(user_id, property_name, destination, city, **kwargs),
+            timeout=COMMUTE_AGGREGATE_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        prop = _find_prop(user_id, property_name)
+        prop_name = prop.get("property_name", property_name) if prop else property_name
+        logger.warning(
+            "estimate_commute timed out after %ds — user=%s property=%s dest=%s",
+            COMMUTE_AGGREGATE_TIMEOUT_S, user_id, prop_name, destination,
+        )
+        return (
+            f"Commute estimate for '{prop_name}' to '{destination}' timed out. "
+            f"The mapping services are slow right now. Try again in a moment, "
+            f"or ask me to search for properties closer to '{destination}' instead."
+        )
+
+
+async def _estimate_commute_inner(
+    user_id: str, property_name: str, destination: str, city: str = "", **kwargs
+) -> str:
+    """Inner implementation — called within aggregate timeout wrapper."""
     prop = _find_prop(user_id, property_name)
     if not prop:
         return f"Property '{property_name}' not found."
