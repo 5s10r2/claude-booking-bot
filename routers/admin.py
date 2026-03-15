@@ -65,6 +65,9 @@ from db.redis_store import (
     set_human_mode,
     get_agent_costs,
     get_daily_cost,
+    get_tool_stats,
+    get_routing_overrides,
+    get_response_latency,
 )
 
 logger = get_logger("routers.admin")
@@ -185,17 +188,73 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
     except Exception as e:
         logger.warning("cost aggregation failed: %s", e)
 
+    # --- Tool reliability: aggregate across date range (brand-scoped) ---
+    tool_stats_agg: dict[str, dict] = {}
+    for i in range(days):
+        day = (today - timedelta(days=i)).isoformat()
+        for tool, stats in get_tool_stats(day, brand_hash=brand_hash).items():
+            if tool not in tool_stats_agg:
+                tool_stats_agg[tool] = {"ok": 0, "fail": 0, "lat_sum": 0, "lat_n": 0}
+            tool_stats_agg[tool]["ok"] += stats.get("ok", 0)
+            tool_stats_agg[tool]["fail"] += stats.get("fail", 0)
+            tool_stats_agg[tool]["lat_sum"] += stats.get("ok", 0) * stats.get("avg_latency_ms", 0)
+            tool_stats_agg[tool]["lat_n"] += stats.get("ok", 0) + stats.get("fail", 0)
+    # Compute derived fields
+    for tool, s in tool_stats_agg.items():
+        total = s["ok"] + s["fail"]
+        s["total"] = total
+        s["failure_rate"] = round(s["fail"] / total, 3) if total else 0
+        s["avg_latency_ms"] = round(s["lat_sum"] / s["lat_n"]) if s["lat_n"] else 0
+        del s["lat_sum"]
+        del s["lat_n"]
+
+    # --- Routing overrides: aggregate across date range ---
+    routing_agg: dict[str, int] = {}
+    for i in range(days):
+        day = (today - timedelta(days=i)).isoformat()
+        for key, count in get_routing_overrides(day, brand_hash=brand_hash).items():
+            routing_agg[key] = routing_agg.get(key, 0) + count
+    total_routed = sum(agent_totals.values())
+    override_total = routing_agg.get("_total", 0)
+    routing_accuracy_pct = round((1 - override_total / total_routed) * 100, 1) if total_routed else 100.0
+
+    # --- Response latency: aggregate across date range ---
+    latency_agg: dict[str, dict] = {}
+    for i in range(days):
+        day = (today - timedelta(days=i)).isoformat()
+        for agent, lat in get_response_latency(day, brand_hash=brand_hash).items():
+            if agent not in latency_agg:
+                latency_agg[agent] = {"sum_ms": 0, "count": 0}
+            latency_agg[agent]["sum_ms"] += lat.get("avg_ms", 0) * lat.get("count", 0)
+            latency_agg[agent]["count"] += lat.get("count", 0)
+    for agent, s in latency_agg.items():
+        s["avg_ms"] = round(s["sum_ms"] / s["count"]) if s["count"] else 0
+        del s["sum_ms"]
+
+    # --- Cost-per-conversion (INR, 1 USD = 95 INR) ---
+    USD_TO_INR = 95
+    total_cost_inr = round(total_cost_usd * USD_TO_INR, 2)
+    cost_per_visit_inr = round((total_cost_usd / visits_booked) * USD_TO_INR, 2) if visits_booked else None
+    bookings = funnel_totals.get("booking", 0)
+    cost_per_booking_inr = round((total_cost_usd / bookings) * USD_TO_INR, 2) if bookings else None
+
     return {
         # KPI cards
         "total_messages": total_messages,
         "active_users": active_users_count,
         "visits_booked": visits_booked,
         "new_leads": new_leads,
-        "total_cost_usd": round(total_cost_usd, 4),
+        "total_cost_inr": total_cost_inr,
+        "cost_per_visit_inr": cost_per_visit_inr,
+        "cost_per_booking_inr": cost_per_booking_inr,
         # Chart data
         "daily": daily,
         "agents": agent_totals,
         "skills": {"usage": skill_totals, "misses": skill_miss_totals},
+        # Observability (Sprint 1)
+        "tool_stats": tool_stats_agg,
+        "routing": {"overrides": routing_agg, "accuracy_pct": routing_accuracy_pct},
+        "latency": latency_agg,
         # Extended data (kept for backward compat)
         "funnel": funnel_totals,
         "feedback": feedback,
@@ -251,7 +310,7 @@ async def admin_conversations(offset: int = 0, limit: int = 50, brand_hash: str 
             "last_seen": mem.get("last_seen", ""),
             "human_mode": human_mode,
             "message_count": len(conv),
-            "cost_usd": cost_data.get("cost_usd", 0.0),
+            "cost_inr": round(cost_data.get("cost_usd", 0.0) * 95, 2),
         })
 
     return {
@@ -368,17 +427,20 @@ async def admin_command_center(brand_hash: str = Depends(require_admin_brand_key
     return {
         "today": {
             "messages":         msg_count,
-            "new_leads":        day_funnel.get("searching", 0),
-            "visits_scheduled": day_funnel.get("visit_scheduled", 0),
-            "booked":           day_funnel.get("booked", 0),
+            "new_leads":        day_funnel.get("search", 0),
+            "visits_scheduled": day_funnel.get("visit", 0),
+            "booked":           day_funnel.get("booking", 0),
         },
         "funnel":               day_funnel,
         "agents":               day_agents,
         "active_conversations": get_brand_active_users_count(brand_hash),
         "human_mode_count":     human_count,
-        # Cost fields — consumed by admin portal AnalyticsPage AgentCostTable + KPI card
-        "cost_usd_today":       get_daily_cost(today, brand_hash=brand_hash),
+        # Cost fields (INR, 1 USD = 95 INR)
+        "cost_inr_today":       round(get_daily_cost(today, brand_hash=brand_hash) * 95, 2),
         "agents_cost":          get_agent_costs(today, brand_hash=brand_hash),
+        # Cost-per-conversion (today, INR)
+        "cost_per_visit_inr":   round(get_daily_cost(today, brand_hash=brand_hash) * 95 / day_funnel.get("visit", 1), 2) if day_funnel.get("visit") else None,
+        "cost_per_booking_inr": round(get_daily_cost(today, brand_hash=brand_hash) * 95 / day_funnel.get("booking", 1), 2) if day_funnel.get("booking") else None,
         "generated_at":         datetime.utcnow().isoformat(),
     }
 
@@ -429,7 +491,7 @@ def _lead_row(uid: str) -> dict:
         "amenities":        prefs.get("amenities") or prefs.get("must_have_amenities") or [],
         "sharing_types":    prefs.get("sharing_types_enabled") or [],
         # Cost
-        "cost_usd":         float(cost.get("cost_usd") or 0.0),
+        "cost_inr":         round(float(cost.get("cost_usd") or 0.0) * 95, 2),
     }
 
 

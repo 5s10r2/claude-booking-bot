@@ -117,6 +117,15 @@ from db.redis import (  # noqa: F401
     set_response,
     get_response,
     FUNNEL_STAGES,
+    # Tool reliability (C1)
+    track_tool_result,
+    get_tool_stats,
+    # Routing accuracy (C2)
+    track_routing_override,
+    get_routing_overrides,
+    # Response latency (C3)
+    track_response_latency,
+    get_response_latency,
     # Payment domain
     set_payment_info,
     get_payment_info,

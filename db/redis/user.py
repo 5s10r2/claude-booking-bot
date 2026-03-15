@@ -206,7 +206,10 @@ def update_persona(user_id: str, text: str) -> str:
     return detected or current
 
 
-FUNNEL_ORDER = ("search", "detail", "shortlist", "visit", "booking")
+FUNNEL_ORDER = (
+    "search", "detail", "shortlist", "visit", "booking",
+    "visit_attended", "booking_initiated", "payment_completed",
+)
 
 
 def get_user_memory(user_id: str) -> dict:

@@ -1,7 +1,11 @@
 import httpx
 
 from config import settings
+from core.log import get_logger
+from db.redis_store import track_funnel, get_user_brand
 from utils.properties import find_property as _find_property
+
+logger = get_logger("tools.reserve")
 
 
 CHECK_RESERVE_BED_SCHEMA = {
@@ -87,5 +91,6 @@ async def reserve_bed(user_id: str, property_name: str, **kwargs) -> str:
         return f"Error reserving bed: {str(e)}"
 
     if data.get("success"):
+        track_funnel(user_id, "booking_initiated", brand_hash=get_user_brand(user_id))
         return f"Bed reserved successfully at '{prop.get('property_name', property_name)}'!"
     return f"Failed to reserve bed: {data.get('message', 'Unknown error')}"

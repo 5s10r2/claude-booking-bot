@@ -1,3 +1,4 @@
+import time
 from typing import Any, Callable
 
 from core.log import get_logger
@@ -92,11 +93,25 @@ class ToolExecutor:
                 self._handlers[tool_name] = handler
         if handler is None:
             return f"Error: Unknown tool '{tool_name}'"
+        t0 = time.monotonic()
         try:
             result = handler(user_id=user_id, **tool_input)
             if hasattr(result, "__await__"):
                 result = await result
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            self._track(tool_name, True, latency_ms, user_id)
             return str(result)
         except Exception as e:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            self._track(tool_name, False, latency_ms, user_id)
             logger.error("Error executing %s: %s", tool_name, e, exc_info=True)
             return _build_fallback(tool_name, tool_input, user_id, str(e))
+
+    @staticmethod
+    def _track(tool_name: str, success: bool, latency_ms: int, user_id: str) -> None:
+        """Fire-and-forget tool reliability tracking."""
+        try:
+            from db.redis_store import track_tool_result, get_user_brand
+            track_tool_result(tool_name, success, latency_ms, brand_hash=get_user_brand(user_id))
+        except Exception:
+            pass  # Non-blocking — never break tool execution

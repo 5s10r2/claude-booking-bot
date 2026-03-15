@@ -126,6 +126,15 @@ from db.redis.analytics import (  # noqa: F401
     get_agent_costs,
     increment_daily_cost,
     get_daily_cost,
+    # Tool reliability (C1)
+    track_tool_result,
+    get_tool_stats,
+    # Routing accuracy (C2)
+    track_routing_override,
+    get_routing_overrides,
+    # Response latency (C3)
+    track_response_latency,
+    get_response_latency,
     set_response,
     get_response,
     FUNNEL_STAGES,

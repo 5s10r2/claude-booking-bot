@@ -1,12 +1,18 @@
 """
-db/redis/analytics.py — Analytics, feedback, skill tracking, funnel, and WhatsApp dedup.
+db/redis/analytics.py — Analytics, feedback, skill tracking, funnel, observability.
 
 Covers:
   - Feedback (thumbs up/down)
   - Agent usage tracking
   - Skill usage + miss tracking
-  - Funnel stage tracking
+  - Funnel stage tracking (8 stages: search → payment_completed)
+  - Tool reliability tracking (success/failure/latency per tool)
+  - Routing accuracy tracking (supervisor override counts)
+  - Response latency tracking (per-agent end-to-end)
+  - Property-level event tracking (per-property funnel)
   - WhatsApp message response tracking (dedup)
+
+All tracking functions dual-write to global + brand-scoped keys.
 """
 
 import json
@@ -131,10 +137,13 @@ def get_skill_misses(day: str = None, brand_hash: str = None) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# Funnel tracking (search → detail → shortlist → visit → booking)
+# Funnel tracking (search → … → payment_completed)
 # ---------------------------------------------------------------------------
 
-FUNNEL_STAGES = ("search", "detail", "shortlist", "visit", "booking")
+FUNNEL_STAGES = (
+    "search", "detail", "shortlist", "visit", "booking",
+    "visit_attended", "booking_initiated", "payment_completed",
+)
 
 
 def track_funnel(user_id: str, stage: str, brand_hash: str = None) -> None:
@@ -247,6 +256,170 @@ def get_daily_cost(day: str = None, brand_hash: str = None) -> float:
     key = f"daily_cost:{brand_hash}:{day}" if brand_hash else f"daily_cost:{day}"
     raw = _r().hget(key, "cost_usd")
     return round(float(raw), 4) if raw else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Tool reliability tracking (C1 — success/failure/latency per tool)
+# ---------------------------------------------------------------------------
+
+def track_tool_result(tool_name: str, success: bool, latency_ms: int, brand_hash: str = None) -> None:
+    """Track a single tool invocation result. Dual-write global + brand-scoped.
+
+    Redis hash fields per tool: {tool}:ok, {tool}:fail, {tool}:lat_sum, {tool}:lat_n
+    """
+    day = date.today().isoformat()
+    status_field = f"{tool_name}:ok" if success else f"{tool_name}:fail"
+    key = f"tool_stats:{day}"
+    pipe = _r().pipeline(transaction=False)
+    pipe.hincrby(key, status_field, 1)
+    pipe.hincrbyfloat(key, f"{tool_name}:lat_sum", latency_ms)
+    pipe.hincrby(key, f"{tool_name}:lat_n", 1)
+    pipe.expire(key, ANALYTICS_TTL)
+    if brand_hash:
+        bkey = f"tool_stats:{brand_hash}:{day}"
+        pipe.hincrby(bkey, status_field, 1)
+        pipe.hincrbyfloat(bkey, f"{tool_name}:lat_sum", latency_ms)
+        pipe.hincrby(bkey, f"{tool_name}:lat_n", 1)
+        pipe.expire(bkey, ANALYTICS_TTL)
+    pipe.execute()
+
+
+def get_tool_stats(day: str = None, brand_hash: str = None) -> dict[str, dict]:
+    """Return {tool: {ok, fail, avg_latency_ms, failure_rate}} for a day.
+
+    Brand-scoped if brand_hash provided.
+    """
+    if day is None:
+        day = date.today().isoformat()
+    key = f"tool_stats:{brand_hash}:{day}" if brand_hash else f"tool_stats:{day}"
+    raw = _r().hgetall(key)
+    if not raw:
+        return {}
+    # Collect raw fields into per-tool dict
+    tools: dict[str, dict] = {}
+    for k, v in raw.items():
+        parts = k.decode().rsplit(":", 1)
+        if len(parts) != 2:
+            continue
+        tool, field = parts
+        if tool not in tools:
+            tools[tool] = {"ok": 0, "fail": 0, "lat_sum": 0.0, "lat_n": 0}
+        val = float(v)
+        if field == "ok":
+            tools[tool]["ok"] = int(val)
+        elif field == "fail":
+            tools[tool]["fail"] = int(val)
+        elif field == "lat_sum":
+            tools[tool]["lat_sum"] = val
+        elif field == "lat_n":
+            tools[tool]["lat_n"] = int(val)
+    # Compute derived metrics
+    result: dict[str, dict] = {}
+    for tool, d in tools.items():
+        total = d["ok"] + d["fail"]
+        result[tool] = {
+            "ok": d["ok"],
+            "fail": d["fail"],
+            "total": total,
+            "failure_rate": round(d["fail"] / total, 3) if total else 0.0,
+            "avg_latency_ms": round(d["lat_sum"] / d["lat_n"]) if d["lat_n"] else 0,
+        }
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Routing accuracy tracking (C2 — supervisor override counts)
+# ---------------------------------------------------------------------------
+
+def track_routing_override(original_agent: str, corrected_agent: str, brand_hash: str = None) -> None:
+    """Track when the keyword safety net overrides the supervisor's classification.
+
+    Redis hash field: {original}>{corrected} (e.g. "broker>booking")
+    Also tracks total override count.
+    """
+    day = date.today().isoformat()
+    field = f"{original_agent}>{corrected_agent}"
+    key = f"routing_overrides:{day}"
+    pipe = _r().pipeline(transaction=False)
+    pipe.hincrby(key, field, 1)
+    pipe.hincrby(key, "_total", 1)
+    pipe.expire(key, ANALYTICS_TTL)
+    if brand_hash:
+        bkey = f"routing_overrides:{brand_hash}:{day}"
+        pipe.hincrby(bkey, field, 1)
+        pipe.hincrby(bkey, "_total", 1)
+        pipe.expire(bkey, ANALYTICS_TTL)
+    pipe.execute()
+
+
+def get_routing_overrides(day: str = None, brand_hash: str = None) -> dict[str, int]:
+    """Return {original>corrected: count, _total: count} for a day.
+
+    Brand-scoped if brand_hash provided.
+    """
+    if day is None:
+        day = date.today().isoformat()
+    key = f"routing_overrides:{brand_hash}:{day}" if brand_hash else f"routing_overrides:{day}"
+    raw = _r().hgetall(key)
+    return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
+
+
+# ---------------------------------------------------------------------------
+# Response latency tracking (C3 — per-agent end-to-end pipeline latency)
+# ---------------------------------------------------------------------------
+
+def track_response_latency(agent_name: str, latency_ms: int, brand_hash: str = None) -> None:
+    """Track end-to-end pipeline latency for a single request.
+
+    Redis hash fields: {agent}:sum, {agent}:n, {agent}:max
+    """
+    day = date.today().isoformat()
+    key = f"latency:{day}"
+    pipe = _r().pipeline(transaction=False)
+    pipe.hincrbyfloat(key, f"{agent_name}:sum", latency_ms)
+    pipe.hincrby(key, f"{agent_name}:n", 1)
+    # Track max via Lua script for atomicity
+    # Fallback: just use hincrbyfloat pattern and compute max on read
+    pipe.expire(key, ANALYTICS_TTL)
+    if brand_hash:
+        bkey = f"latency:{brand_hash}:{day}"
+        pipe.hincrbyfloat(bkey, f"{agent_name}:sum", latency_ms)
+        pipe.hincrby(bkey, f"{agent_name}:n", 1)
+        pipe.expire(bkey, ANALYTICS_TTL)
+    pipe.execute()
+
+
+def get_response_latency(day: str = None, brand_hash: str = None) -> dict[str, dict]:
+    """Return {agent: {avg_ms, count}} for a day.
+
+    Brand-scoped if brand_hash provided.
+    """
+    if day is None:
+        day = date.today().isoformat()
+    key = f"latency:{brand_hash}:{day}" if brand_hash else f"latency:{day}"
+    raw = _r().hgetall(key)
+    if not raw:
+        return {}
+    agents: dict[str, dict] = {}
+    for k, v in raw.items():
+        parts = k.decode().rsplit(":", 1)
+        if len(parts) != 2:
+            continue
+        agent, field = parts
+        if agent not in agents:
+            agents[agent] = {"sum": 0.0, "n": 0}
+        val = float(v)
+        if field == "sum":
+            agents[agent]["sum"] = val
+        elif field == "n":
+            agents[agent]["n"] = int(val)
+    result: dict[str, dict] = {}
+    for agent, d in agents.items():
+        result[agent] = {
+            "avg_ms": round(d["sum"] / d["n"]) if d["n"] else 0,
+            "count": d["n"],
+        }
+    return result
 
 
 # ---------------------------------------------------------------------------

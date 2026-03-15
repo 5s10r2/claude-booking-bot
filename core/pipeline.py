@@ -5,6 +5,8 @@ Both functions are used by the streaming and non-streaming chat endpoints.
 They reference core.state.engine and core.state.conversation (set at lifespan startup).
 """
 
+import time
+
 import core.state as state
 from core.log import get_logger
 from core.language import detect_language
@@ -21,6 +23,8 @@ from db.redis_store import (
     set_last_agent,
     track_agent_usage,
     track_skill_usage,
+    track_routing_override,
+    track_response_latency,
     update_persona,
     get_user_brand,
 )
@@ -77,6 +81,7 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     agent_name = apply_keyword_safety_net(agent_name, message, user_id)
     if agent_name != original_agent:
         skills = []  # Safety net fired — skills from wrong agent are invalid
+        track_routing_override(original_agent, agent_name, brand_hash=brand_hash)
 
     if agent_name == "broker" and not skills:
         from skills.skill_map import detect_skills_heuristic
@@ -90,6 +95,7 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
         track_skill_usage(skills, brand_hash=brand_hash)
 
     # Step 2: Run selected agent (with language + skills for broker)
+    t0 = time.monotonic()
     if agent_name == "broker":
         response = await broker_agent.run(state.engine, messages, user_id, language=language, skills=skills)
     else:
@@ -100,6 +106,8 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
         }
         agent_fn = agent_map.get(agent_name, default_agent.run)
         response = await agent_fn(state.engine, messages, user_id, language=language)
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    track_response_latency(agent_name, latency_ms, brand_hash=brand_hash)
 
     # Track last active agent for multi-turn continuations
     set_last_agent(user_id, agent_name)
@@ -137,6 +145,7 @@ async def _route_agent(user_id: str, message: str) -> tuple[str, list[dict], str
     # If safety net changed the agent, skills are no longer valid
     if agent_name != original_agent:
         skills = []
+        track_routing_override(original_agent, agent_name, brand_hash=brand_hash)
     # Keyword fallback for broker skill detection
     if agent_name == "broker" and not skills:
         from skills.skill_map import detect_skills_heuristic
