@@ -4,7 +4,7 @@
 >
 > **How to use it**: Skim the Executive Summary (§1) for orientation. Jump directly to the section you need. Cross-reference CLAUDE.md for the complete file map and task recipes.
 >
-> **Last updated**: 2026-03-09 | **Maintained by**: whoever makes a structural change
+> **Last updated**: 2026-03-15 | **Maintained by**: whoever makes a structural change
 
 ---
 
@@ -140,34 +140,61 @@ CC Booking Bot FInal/              # polyrepo root — NOT a monorepo
 │                                  # no shared package.json, no shared tooling
 │                                  # three independent deployment units
 │
-├── claude-booking-bot/            # Python/FastAPI backend
-│   ├── main.py                    # ⚠️ 840-line god-file — all endpoints
-│   ├── config.py                  # Pydantic settings, feature flags, model IDs
+├── claude-booking-bot/            # Python/FastAPI backend (git repo)
+│   ├── main.py                    # FastAPI app factory + lifespan (129 lines — endpoints split into routers/)
+│   ├── config.py                  # Pydantic settings, feature flags (KYC_ENABLED, PAYMENT_REQUIRED, DYNAMIC_SKILLS_ENABLED), model IDs
 │   ├── requirements.txt           # 16 packages (lean after dead-code removal)
 │   ├── build.sh                   # Render build script (pip install)
-│   ├── agents/                    # 4 agent configs (supervisor, broker, booking, profile, default)
-│   ├── core/                      # Engine: claude.py, prompts.py, summarizer.py, router.py, tool_executor.py, ui_parts.py
-│   ├── tools/                     # 28 tool implementations across broker/, booking/, profile/, common/
+│   ├── .claude/launch.json        # Claude Code dev server config (uvicorn port 8000)
+│   ├── CLAUDE.md                  # ✅ PRIMARY — complete file map, line numbers, task recipes
+│   ├── PRD-VOICE-AGENT.md         # AI Voice Agent PRD v3.0 (2,609 lines — sales intelligence, skill reuse)
+│   ├── QA_REPORT.md               # QA test results and regression reports
+│   ├── RENTOK_API.md              # Rentok API documentation
+│   ├── agents/                    # 5 agent configs (supervisor, broker, booking, profile, default)
+│   ├── routers/                   # FastAPI routers: public.py, chat.py, webhooks.py, admin.py
+│   ├── core/                      # Engine: claude.py, prompts.py, pipeline.py, summarizer.py, router.py, tool_executor.py, ui_parts.py, auth.py, state.py
+│   ├── tools/                     # 28 tool implementations across broker/, booking/, profile/, default/, common/
 │   ├── skills/                    # Dynamic skill system: loader.py, skill_map.py, broker/*.md (12 files)
-│   ├── db/                        # redis_store.py (⚠️ 1034 lines), postgres.py
+│   ├── db/
+│   │   ├── redis/                 # Redis domain package (8 modules, ~1,279 lines — split from former god-file)
+│   │   │   ├── _base.py           # Connection pool, helpers
+│   │   │   ├── conversation.py    # History, compaction, wamid dedup, WA queue, pipeline cancel
+│   │   │   ├── user.py            # Memory, preferences, shortlist, followups, lead score
+│   │   │   ├── property.py        # Property cache, images, templates
+│   │   │   ├── payment.py         # Payment link + active request dedup
+│   │   │   ├── analytics.py       # Funnel, feedback, agent/skill usage, costs (dual-write: global + brand)
+│   │   │   ├── brand.py           # Brand config, WA reverse-lookup, per-brand flags
+│   │   │   └── admin.py           # Active users, human mode (brand-scoped), session cost
+│   │   ├── redis_store.py         # ⚠️ SHIM only — re-exports from db/redis/ (backward compat)
+│   │   └── postgres.py            # Message logging + leads + property docs (brand_hash column)
 │   ├── channels/                  # whatsapp.py (Meta + Interakt dual support)
-│   ├── utils/                     # date.py, geo.py, image.py, scoring.py, retry.py, properties.py, api.py
+│   ├── utils/                     # date.py, geo.py, image.py, scoring.py, retry.py, properties.py, api.py, property_docs.py
 │   ├── data/                      # transit_lines.json (Mumbai/Bangalore/Delhi/Pune metro)
-│   └── stress_test_broker.py      # 20-scenario E2E test (requires live backend)
+│   ├── docs/                      # Documentation directory
+│   │   ├── ARCHITECTURE.md        # Deep reference — Redis keys, Rentok API catalog, agent-tool mapping
+│   │   ├── CHANGES_FROM_MAIN.md   # Change log from main branch
+│   │   ├── DIRECTORY.md           # This file
+│   │   └── screenshots/           # 20 UI screenshots (carousel, cards, compare, welcome, etc.)
+│   ├── stress_test_broker.py      # 20-scenario broker regression (local backend)
+│   ├── stress_test_broker_prod.py # 20-scenario broker regression (production URL)
+│   ├── test_comprehensive.py      # 16-tool comprehensive test suite
+│   ├── test_dynamic_skills.py     # 8-scenario dynamic-skill E2E test
+│   ├── test_fixed_tools.py        # Fixed tools regression test
+│   └── test_full_integration.py   # Full integration test suite
 │
 ├── eazypg-chat/                   # Vite 6 / Vanilla JS chat widget
-│   ├── index.html                 # Chat interface (87 lines)
+│   ├── index.html                 # Chat interface (87 lines) + Stop button
 │   ├── dashboard.html             # Analytics dashboard (562 lines)
 │   ├── vite.config.js             # Multi-entry + dev proxy (/api/* → :8000)
 │   ├── vercel.json                # Function timeouts: stream/chat=120s
 │   ├── src/
 │   │   ├── config.js              # Global state: userId, ACCOUNT_VALUES, FALLBACK_ACCOUNT_VALUES
-│   │   ├── stream.js              # SSE handler — central traffic controller
+│   │   ├── stream.js              # SSE handler + AbortController interrupt + stopStream()
 │   │   ├── main.js                # Entry: fetchBrandConfig() + event listeners
-│   │   ├── renderers/             # server-parts.js (9 component types), property-card.js, compare-card.js
+│   │   ├── renderers/             # server-parts.js (10 component types), property-card.js, compare-card.js
 │   │   └── components/            # PropertyMap.js (Leaflet)
-│   ├── styles/                    # base.css, carousel.css, components.css, animations.css, gallery.css, status-card.css
-│   └── api/                       # Vercel Edge proxies: stream.js, chat.js, feedback.js, brand-config.js, analytics.js, deepgram-token.js
+│   ├── styles/                    # base.css, carousel.css, components.css, animations.css, gallery.css, status-card.css, input.css
+│   └── api/                       # Vercel Edge proxies: stream.js, chat.js, feedback.js, brand-config.js, analytics.js, deepgram-token.js, language.js
 │
 ├── eazypg-admin/                  # React 19 / TypeScript admin portal
 │   ├── src/
@@ -175,14 +202,14 @@ CC Booking Bot FInal/              # polyrepo root — NOT a monorepo
 │   │   ├── lib/                   # types.ts (all interfaces), api.ts (apiFetch), auth.ts
 │   │   ├── hooks/                 # 7 TanStack Query hooks (useConversations, useLeads, useBrandConfig, etc.)
 │   │   ├── pages/                 # ConversationsPage, LeadsPage, AnalyticsPage, PropertiesPage, SettingsPage
-│   │   └── components/            # AppShell, ThreadPanel, nav.js
+│   │   └── components/            # AppShell, ThreadPanel, Sidebar (dynamic brand name)
 │   └── api/                       # 16 Vercel Edge proxies → backend /admin/* endpoints
 │
-├── CLAUDE.md                      # ✅ PRIMARY — complete file map, line numbers, task recipes
-├── ARCHITECTURE.md                # ✅ Deep reference — Redis keys, Rentok API catalog, agent-tool mapping
+├── CLAUDE.md                      # Root-level project instructions (also in claude-booking-bot/)
+├── ARCHITECTURE.md                # Root-level copy (canonical is docs/ARCHITECTURE.md)
 ├── README.md                      # ⚠️ STALE — references dead "Room" agent + KB endpoints
-├── CHANGES_FROM_MAIN.md           # Branch diff log
-└── DIRECTORY.md                   # This file
+├── CHANGES_FROM_MAIN.md           # Root-level copy
+└── PRD-VOICE-AGENT.md             # Root-level copy of voice agent PRD
 ```
 
 **Key structural facts:**
@@ -198,31 +225,42 @@ CC Booking Bot FInal/              # polyrepo root — NOT a monorepo
 ### Request Lifecycle — Web Chat
 
 ```
-User types → eazypg-chat/src/stream.js (sendMessage)
+User types → eazypg-chat/src/stream.js (sendMessage + AbortController)
   → POST /api/stream (Vercel Edge proxy, 120s timeout)
   → POST https://claude-booking-bot.onrender.com/chat/stream
-  → main.py:chat_stream (SSE endpoint, line 464)
-    → [Human Mode check] → if active: emit done{agent="human"}, return
-    → rate_limiter.check_rate_limit (6/min, 30/hr, 100/min global)
-    → load conversation history from Redis
-    → _route_agent: keyword safety net → supervisor LLM → last_agent fallback
-    → agent.run() with tool loop (max 15 rounds, parallel execution via asyncio.gather)
-    → maybe_summarize() if >30 messages
-    → save conversation to Redis (24h TTL)
+  → routers/chat.py:chat_stream (SSE endpoint)
+    → core/pipeline.py:run_pipeline()
+      → [Human Mode check] → if active: emit done{agent="human"}, return
+      → rate_limiter.check_rate_limit (6/min, 30/hr, 100/min global)
+      → load conversation history from Redis
+      → _route_agent: keyword safety net → supervisor LLM → last_agent fallback
+      → agent.run() with tool loop (max 15 rounds, parallel execution via asyncio.gather)
+      → maybe_summarize() if >30 messages (brand context injected)
+      → save conversation to Redis (24h TTL) + tag user brand
     → SSE stream: agent_start → tool_start → tool_done → content_delta×N → done{parts[]}
   → Frontend parses SSE, renders component registry (server-parts.js)
+  → User can interrupt: AbortController cancels stream, Stop button visible during streaming
 ```
 
-### Request Lifecycle — WhatsApp
+### Request Lifecycle — WhatsApp (Phase B+C: Multi-Turn Queue)
 
 ```
 User sends message on WhatsApp
-  → Meta/Interakt webhook → POST /webhook/whatsapp (main.py:552)
+  → Meta/Interakt webhook → POST /webhook/whatsapp (routers/webhooks.py)
+  → wamid dedup: is_wamid_seen(wamid) → skip if duplicate (24h TTL)
   → Extract phone_number_id → hydrate brand config from Redis (brand_wa:{phone_id})
-  → set_account_values(user_id, brand_cfg) with 1h TTL
-  → Same pipeline as web (run_pipeline)
-  → message_parser.parse_message_parts: markdown → WhatsApp-compatible parts
-  → whatsapp.py: send_text / send_carousel / send_image (Meta or Interakt per is_meta flag)
+  → Tag user: set_user_brand(uid, brand_hash)
+  → wa_queue_push(uid, message) → Redis list {uid}:wa_queue
+  → Return 200 immediately (no blocking)
+  → _drain_and_process() async task:
+    → wa_processing_acquire(uid) → SET NX lock (2 min TTL)
+    → sleep(WA_DEBOUNCE_SECONDS=2.0) — wait for burst messages
+    → wa_queue_drain(uid) → LPOP all pending messages
+    → run_pipeline(combined_messages) → same pipeline as web
+    → If new messages arrived during pipeline: set_cancel_requested(uid) → loop
+    → message_parser.parse_message_parts: markdown → WhatsApp-compatible parts
+    → whatsapp.py: send_text / send_carousel / send_image (Meta or Interakt per is_meta flag)
+    → wa_processing_release(uid)
 ```
 
 ### SSE Event Protocol
@@ -264,17 +302,17 @@ API key (e.g. "oxotel-uat-2026")
   → brand_wa:{phone_number_id} → full config (for WhatsApp webhook hydration)
 ```
 
-### Human Mode (Admin Takeover)
+### Human Mode (Admin Takeover — Brand-Scoped)
 
 ```
 Admin clicks "Take Over" → POST /admin/conversations/{uid}/takeover
-  → Redis: set {uid}:human_mode = {"active": "1", "taken_at": timestamp}
+  → Redis: set {uid}:{brand_hash}:human_mode = {"active": "1", "taken_at": timestamp}
+  → Brand-scoped: only the brand that took over blocks AI; other brands unaffected
+  → Fallback: checks legacy {uid}:human_mode if brand-scoped key absent
 
 Next user message (any channel):
-  → chat_stream: checks human_mode BEFORE routing → early return, emit done{agent="human"}
-  → whatsapp_webhook: checks AFTER delete_active_request → early return, no send
-  → /chat: checks BEFORE Postgres insert → ChatResponse(agent="human")
-  → AI never responds while human mode is active
+  → pipeline.py: checks get_human_mode(uid, brand_hash) BEFORE routing → early return
+  → AI never responds while human mode is active for that brand
 ```
 
 ### Dynamic Skill System (Broker Agent)
@@ -448,22 +486,49 @@ DYNAMIC_SKILLS_ENABLED=false:
 | `brand_wa:{phone_number_id}` | None | Reverse-lookup: Meta webhook → brand config |
 | `brand_token:{uuid}` | None | Public chatbot link token → brand hash |
 
-**Analytics**
+**Analytics (dual-write: global + brand-scoped)**
 
 | Key | TTL | Purpose |
 |---|---|---|
-| `agent_usage:{YYYY-MM-DD}` | 90 days | Per-agent message counts |
-| `funnel:{YYYY-MM-DD}` | 90 days | Funnel: search, detail, shortlist, visit, booking |
-| `skill_usage:{day}` | 90 days | Per-skill call counts |
-| `skill_misses:{day}` | 90 days | Tool calls blocked by skill filtering |
-| `feedback:counts` | None | Aggregated thumbs up/down per agent |
-| `active_users` | None | Sorted Set: uid → last_seen timestamp |
+| `agent_usage:{YYYY-MM-DD}` | 90 days | Per-agent message counts (global) |
+| `agent_usage:{brand_hash}:{day}` | 90 days | Per-agent message counts (brand-scoped) |
+| `funnel:{YYYY-MM-DD}` | 90 days | Funnel events (global) |
+| `funnel:{brand_hash}:{day}` | 90 days | Funnel events (brand-scoped) |
+| `skill_usage:{day}` | 90 days | Per-skill call counts (global) |
+| `skill_usage:{brand_hash}:{day}` | 90 days | Per-skill call counts (brand-scoped) |
+| `skill_misses:{day}` | 90 days | Tool calls blocked by skill filtering (global) |
+| `skill_misses:{brand_hash}:{day}` | 90 days | Tool calls blocked (brand-scoped) |
+| `agent_cost:{day}` | 90 days | Agent cost tracking (global) |
+| `agent_cost:{brand_hash}:{day}` | 90 days | Agent cost tracking (brand-scoped) |
+| `daily_cost:{day}` | 90 days | Daily cost aggregate (global) |
+| `daily_cost:{brand_hash}:{day}` | 90 days | Daily cost aggregate (brand-scoped) |
+| `feedback:counts` | None | Aggregated thumbs up/down per agent (global) |
+| `feedback:counts:{brand_hash}` | None | Feedback counts (brand-scoped) |
+| `active_users` | None | Sorted Set: uid → last_seen timestamp (global) |
+| `active_users:{brand_hash}` | None | Per-brand active user set |
 
-**Human Mode**
+**Human Mode (brand-scoped)**
 
 | Key | TTL | Purpose |
 |---|---|---|
-| `{uid}:human_mode` | None | `{active: "1", taken_at: timestamp}` — cleared on resume |
+| `{uid}:{brand_hash}:human_mode` | None | Per-brand human mode — `{active: "1", taken_at: timestamp}` |
+| `{uid}:human_mode` | None | Legacy global fallback (read if brand-scoped absent) |
+
+**Multi-Brand Isolation**
+
+| Key | TTL | Purpose |
+|---|---|---|
+| `{uid}:brand_hash` | None | User → brand mapping (persistent, set on first message) |
+| `brand_flags:{brand_hash}` | None | Per-brand feature flag overrides (JSON) |
+
+**Multi-Turn Message Handling (Phase B+C)**
+
+| Key | TTL | Purpose |
+|---|---|---|
+| `wamid:{wamid}` | 24h | WhatsApp message dedup by Meta unique ID |
+| `{uid}:wa_queue` | 5 min | Pending WhatsApp messages (RPUSH on arrival, LPOP drain) |
+| `{uid}:wa_processing` | 2 min | Per-user drain lock (SET NX) |
+| `{uid}:cancel_requested` | 30s | Pipeline cancellation signal |
 
 **Payment**
 
@@ -480,10 +545,11 @@ DYNAMIC_SKILLS_ENABLED=false:
 ### PostgreSQL Tables
 
 ```sql
-booking_messages (id, user_id, role, content, agent, tokens_in, tokens_out, cost_usd, created_at)
+booking_messages (id, user_id, role, content, agent, tokens_in, tokens_out, cost_usd, brand_hash, created_at)
+leads (id, user_id, property_id, name, phone, stage, brand_hash, created_at, updated_at)
 property_documents (id, property_id, filename, file_type, content_text, size_bytes, uploaded_at)
 ```
-PostgreSQL is **non-critical** — the backend has graceful degradation if it's unavailable. Conversation state lives in Redis, not Postgres.
+PostgreSQL is **non-critical** — the backend has graceful degradation if it's unavailable. Conversation state lives in Redis, not Postgres. `brand_hash` columns added via idempotent migration on startup (`add_brand_hash_columns`).
 
 ### External API Integrations
 
@@ -548,8 +614,8 @@ Be honest about this. These exist. Work around them; don't pretend they don't ex
 | Debt | Location | Impact | Notes |
 |---|---|---|---|
 | **README.md stale** | README.md | Misleading to newcomers | References dead "Room" agent, `/knowledge-base`, `/query` endpoints — all removed March 2026 |
-| **main.py god-file** | claude-booking-bot/main.py | Hard to navigate, test, or split | 840 lines; all 20+ endpoints in one file; no FastAPI router separation |
-| **redis_store.py god-file** | claude-booking-bot/db/redis_store.py | Same problem | 1,034 lines; no domain separation |
+| ~~**main.py god-file**~~ | claude-booking-bot/main.py | ✅ RESOLVED | Split into `routers/` (public, chat, webhooks, admin); main.py now 129 lines — app factory + lifespan only |
+| ~~**redis_store.py god-file**~~ | claude-booking-bot/db/redis_store.py | ✅ RESOLVED | Split into `db/redis/` (8 domain modules); redis_store.py is now a backward-compat shim |
 | **Monolithic broker prompt** | core/prompts.py (BROKER_AGENT_PROMPT) | Maintained in parallel with skill files | ~340 lines; kept as DYNAMIC_SKILLS_ENABLED=false fallback |
 | **No .env.example** | eazypg-chat/ | Undocumented env vars | New developers don't know which vars are needed |
 | **No integration tests** | Test suite | Live backend required for all E2E tests | Only `stress_test_broker.py` and `test_dynamic_skills.py` (both require live Render URL) |
@@ -567,8 +633,9 @@ Be honest about this. These exist. Work around them; don't pretend they don't ex
 
 | File | Risk Level | Why It's Risky |
 |---|---|---|
-| `claude-booking-bot/db/redis_store.py` | 🔴 CRITICAL | All state operations. Wrong TTL = data loss. Wrong key name = silent miss. Wrong serialization = corrupt state. |
-| `claude-booking-bot/main.py` | 🔴 CRITICAL | Every request flows through here. Human mode bypass lives here at 3 separate call sites. Rate limiter gate is here. |
+| `claude-booking-bot/db/redis/` | 🔴 CRITICAL | All state operations across 8 modules. Wrong TTL = data loss. Wrong key name = silent miss. Wrong serialization = corrupt state. |
+| `claude-booking-bot/core/pipeline.py` | 🔴 CRITICAL | Shared pipeline for chat + WhatsApp. Human mode check, brand-scoped analytics, agent dispatch all flow through here. |
+| `claude-booking-bot/routers/webhooks.py` | 🔴 CRITICAL | WhatsApp webhook + Phase B drain task. wamid dedup, queue management, cancellation. Breaking this = no WhatsApp responses. |
 | `claude-booking-bot/tools/registry.py` | 🟠 HIGH | All 28 tool schemas with `strict=true`. Schema drift = Anthropic API rejects tool call. Missing `required` field = silent None. |
 | `claude-booking-bot/core/prompts.py` | 🟠 HIGH | All system prompts. Small wording change = large behavior change across all users. Monolithic broker prompt lives here as fallback. |
 | `claude-booking-bot/skills/broker/_base.md` | 🟠 HIGH | Always loaded for every broker turn. Prompt-cached. Error here affects every broker response. |
@@ -624,15 +691,18 @@ Be honest about this. These exist. Work around them; don't pretend they don't ex
 
 **Use offset + limit reads**:
 ```
-Read claude-booking-bot/main.py offset=464 limit=80   # chat_stream endpoint
-Read claude-booking-bot/main.py offset=552 limit=80   # whatsapp_webhook endpoint
-Read claude-booking-bot/db/redis_store.py offset=520 limit=40  # get_user_memory
+Read claude-booking-bot/routers/chat.py offset=1 limit=80     # chat endpoints
+Read claude-booking-bot/routers/webhooks.py offset=1 limit=80 # WhatsApp webhook
+Read claude-booking-bot/db/redis/user.py offset=12 limit=40   # get_user_memory
 Read claude-booking-bot/agents/broker_agent.py offset=22 limit=40  # get_config dual-path
 ```
 
 **Key function locations** (from CLAUDE.md):
-- All endpoints: `main.py` — `run_pipeline@155`, `chat_stream@464`, `whatsapp_webhook@552`
-- Redis ops: `db/redis_store.py` — `get_user_memory@520`, `update_user_memory@545`, `get_lead_score@600`
+- Pipeline: `core/pipeline.py` — `run_pipeline@32`, `_route_agent@113`
+- Chat endpoints: `routers/chat.py` — `POST /chat`, `POST /chat/stream`
+- WhatsApp: `routers/webhooks.py` — `POST /webhook/whatsapp`, `_drain_and_process`
+- Admin: `routers/admin.py` — all `/admin/*` routes (brand-scoped)
+- Redis ops: `db/redis/user.py` — `get_user_memory@12`, `update_user_memory@40`, `get_lead_score@200`
 - Skill loading: `skills/loader.py` — `build_skill_prompt@38`
 - Routing: `core/router.py` — `apply_keyword_safety_net@15`
 - Tool executor: `core/tool_executor.py` — `ToolExecutor@55`, `set_fallback@66`
@@ -711,13 +781,23 @@ curl -H "X-API-Key: YOUR_KEY" https://claude-booking-bot.onrender.com/funnel
 ```bash
 cd claude-booking-bot
 
-# 20-scenario broker regression (picks up live OxOtel properties)
+# 16-tool comprehensive test (verifies all registered tools)
+python test_comprehensive.py
+
+# 20-scenario broker regression — local backend
 python stress_test_broker.py
 python stress_test_broker.py --scenario 3  # Run only scenario 3
 python stress_test_broker.py --from 5      # Start from scenario 5
 
+# 20-scenario broker regression — production URL
+python stress_test_broker_prod.py
+
 # Dynamic skill system E2E (8 scenarios, verifies skill analytics delta)
 python test_dynamic_skills.py
+
+# Fixed tools regression + full integration
+python test_fixed_tools.py
+python test_full_integration.py
 ```
 
 ### Brand Seeding (OxOtel initial setup)
@@ -787,7 +867,10 @@ vim claude-booking-bot/skills/broker/search.md
 | `HAIKU_MODEL` | No | `claude-haiku-4-5-20251001` | Broker/supervisor model |
 | `SONNET_MODEL` | No | `claude-sonnet-4-6` | All other agents |
 | `KYC_ENABLED` | No | `false` | Aadhaar verification (disabled in production) |
+| `PAYMENT_REQUIRED` | No | `false` | Payment before reservation; set false to skip payment step |
 | `DYNAMIC_SKILLS_ENABLED` | No | `true` | Dynamic skill system; set false for instant rollback to monolithic prompt |
+| `WA_DEBOUNCE_SECONDS` | No | `2.0` | WhatsApp multi-turn queue debounce |
+| `WAMID_DEDUP_TTL` | No | `86400` | WhatsApp message dedup TTL (seconds) |
 | `WEB_SEARCH_ENABLED` | No | `true` | Web search feature flag |
 | `WEB_SEARCH_MAX_PER_CONVERSATION` | No | `3` | Max Tavily calls per conversation |
 
