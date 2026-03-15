@@ -165,4 +165,9 @@ from db.redis import (  # noqa: F401
     clear_human_mode,
     increment_session_cost,
     get_session_cost,
+    # Quality domain (Sprint 4)
+    compute_conversation_quality,
+    save_conversation_quality,
+    get_conversation_quality,
+    update_conversation_quality,
 )

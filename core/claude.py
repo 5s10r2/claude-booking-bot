@@ -377,6 +377,19 @@ class AnthropicEngine:
             except anthropic.APIError as e:
                 logger.error("API error: %s", e)
                 if attempt == max_retries - 1:
+                    # Fire-and-forget: log API error to PostgreSQL
+                    try:
+                        from db.postgres import insert_error_event
+                        asyncio.create_task(insert_error_event(
+                            user_id="system",
+                            brand_hash=None,
+                            error_type="api_timeout",
+                            error_source="anthropic",
+                            error_message=str(e)[:500],
+                            context={"model": model, "attempt": attempt + 1},
+                        ))
+                    except Exception:
+                        pass
                     return None
                 await asyncio.sleep(1)
         return None

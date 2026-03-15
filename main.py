@@ -80,6 +80,7 @@ async def lifespan(app: FastAPI):
     await pg.create_property_documents_table()
     await pg.create_leads_table()
     await pg.add_brand_hash_columns()  # Phase 2B migration — idempotent
+    await pg.create_error_events_table()  # Sprint 4 — structured error log
     init_registry()
 
     executor = ToolExecutor()

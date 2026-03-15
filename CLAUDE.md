@@ -56,6 +56,7 @@ core/tool_executor.py (97)  — Tool dispatch + error recovery + graceful fallba
 core/router.py       (135)  — Keyword safety net (3-phase) | apply_keyword_safety_net@15 (phrases→words→last_agent)
 core/followup.py     (335)  — Multi-step post-visit follow-up state machine | create_followup_state@47, get_followup_state@87, classify_reply@106, has_active_followup@135, handle_followup_reply@141, advance_followup@225, get_due_state_followups@283
 core/attention.py    (110)  — Needs-attention flag computation | compute_attention_flags@35, save_attention_flags@94, get_attention_flags@99, update_attention_flags@108. Triggered from pipeline.py after assistant response save.
+db/redis/quality.py  (167)  — Conversation quality scoring (0-100) | compute_conversation_quality@30, save_conversation_quality@142, get_conversation_quality@147, update_conversation_quality@158. Triggered from pipeline.py alongside attention flags.
 core/log.py          (42)   — Logging setup | get_logger@39
 core/ui_parts.py     (865)  — Backend-controlled Generative UI parts | generate_ui_parts@618 (quick_replies, action_buttons, expandable_sections from tool results + context), _generate_expandable_sections@515
 ```
@@ -116,9 +117,9 @@ db/redis/payment.py  (114)  — Payment link + active request dedup | get_active
 db/redis/analytics.py (500+) — Funnel events, feedback, agent/skill usage, costs, property events | ALL functions dual-write: global + brand-scoped (brand_hash param). track_funnel@5, get_funnel@40, save_feedback@80, get_feedback_counts@95, track_agent_usage@110, track_skill_usage@130, track_skill_miss@145, increment_agent_cost@155, get_agent_costs@175, increment_daily_cost@185, get_daily_cost@195, track_property_event@430, get_property_events@450, get_property_performance@465
 db/redis/brand.py    (80+)  — Brand config + WA reverse-lookup + brand token + per-brand flags | get_brand_config@5, set_brand_config@20, get_brand_config_by_hash@45, get_brand_flags@55, set_brand_flag@60, get_effective_flags@68 (merges brand overrides over global defaults)
 db/redis/admin.py    (120+) — Active users (global + per-brand), human mode (per-brand scoped), session cost | set_user_brand@38, get_user_brand@43, add_to_brand_active_users@49, get_brand_active_users@54, get_brand_active_users_count@60, get_human_mode@69 (brand-scoped + global fallback), set_human_mode@85, clear_human_mode@91
-db/redis/__init__.py (180+) — Re-exports ALL public symbols from all 8 domain modules (backward-compat)
+db/redis/__init__.py (200+) — Re-exports ALL public symbols from all 9 domain modules (backward-compat)
 db/redis_store.py    (155+) — ⚠️ SHIM only — `from db.redis import *`; kept for backward compat. Do NOT add logic here.
-db/postgres.py       (390+) — PG message logging + leads + property docs | insert_message@48 (brand_hash col), get_message_volume@87 (brand filter), upsert_leads@295 (brand_hash col), add_brand_hash_columns@128 (idempotent migration on startup)
+db/postgres.py       (530+) — PG message logging + leads + property docs + error events | insert_message@48 (brand_hash col), get_message_volume@87 (brand filter), upsert_leads@295 (brand_hash col), add_brand_hash_columns@128 (idempotent migration on startup), create_error_events_table@170, insert_error_event@195, get_error_events@230, get_error_summary@290, cleanup_old_error_events@330
 channels/whatsapp.py (254)  — WhatsApp send (Meta/Interakt) | send_text@60, send_carousel@138
 ```
 
@@ -318,6 +319,7 @@ wamid:{wamid}             String "1", 24h TTL — WhatsApp message dedup by Meta
 property_events:{day}                  Hash, 90d TTL — global property events ({property_id}:{event} → count)
 property_events:{brand_hash}:{day}     Hash, 90d TTL — brand-scoped property events
 {uid}:attention_flags                  JSON list, 1h TTL — cached attention flags (e.g. ["no_response", "hot_lead_stalled"])
+{uid}:conversation_quality             JSON, 90d TTL — {score, signals, computed_at} — conversation quality score (0-100)
 ```
 
 ### New Redis Keys (Follow-Up State Machine — Sprint 2)
@@ -331,11 +333,16 @@ Phase C: `core/claude.py` checks `cancel_requested` between tool-call iterations
 Config: `WA_DEBOUNCE_SECONDS=2.0`, `WAMID_DEDUP_TTL=86400`, `WA_QUEUE_TTL=300`, `WA_PROCESSING_TTL=120` (all in `config.py`).
 Frontend (Phase A): `eazypg-chat/src/stream.js` uses AbortController + requestCounter for interrupt-on-send; Stop button added to `index.html`.
 
-### New Postgres Table (Sprint 5)
+### New Postgres Tables
 ```
 property_documents — id, property_id, filename, file_type, content_text, size_bytes, uploaded_at
                      Created on startup via pg.create_property_documents_table()
                      KB injection: get_property_documents_text(prop_ids) → broker prompt
+
+error_events         — id, user_id, brand_hash, error_type, error_source, error_message, context (JSONB), created_at
+                     Created on startup via pg.create_error_events_table()
+                     Types: tool_failure | api_timeout | empty_response | routing_override
+                     90-day retention via cleanup_old_error_events()
 ```
 
 ### New Backend Endpoints (main.py)
@@ -360,6 +367,7 @@ GET  /admin/brand-config                              — get brand config for A
 POST /admin/brand-config                              — create/update brand config; auto-generates brand_link_token
 POST /admin/backfill-brands                           — one-time migration: tag existing users with OxOtel brand_hash
 POST /admin/leads/{uid}/outcome                        — mark lead outcome (converted/lost/no_show/in_progress); fires side effects
+GET  /admin/errors                                     — paginated error events with type/days filters + summary (brand-scoped)
 GET  /brand-config?token={uuid}                       — PUBLIC, no auth — returns safe fields only (pg_ids, brand_name, cities, areas, brand_hash)
 ```
 

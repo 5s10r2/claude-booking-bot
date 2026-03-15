@@ -367,6 +367,181 @@ async def delete_property_document(property_id: str, doc_id: int) -> bool:
     return result == "DELETE 1"
 
 
+async def create_error_events_table() -> None:
+    """Create error_events table for structured error tracking (called on startup)."""
+    if _pool is None:
+        return
+    try:
+        await _pool.execute("""
+            CREATE TABLE IF NOT EXISTS error_events (
+                id           SERIAL PRIMARY KEY,
+                user_id      TEXT NOT NULL,
+                brand_hash   VARCHAR(16),
+                error_type   VARCHAR(50) NOT NULL,
+                error_source VARCHAR(100) NOT NULL,
+                error_message TEXT,
+                context      JSONB DEFAULT '{}',
+                created_at   TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_error_events_brand_date
+                ON error_events(brand_hash, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_error_events_type
+                ON error_events(error_type, created_at DESC);
+        """)
+    except Exception as e:
+        logger.warning("create_error_events_table: %s", e)
+
+
+async def insert_error_event(
+    user_id: str,
+    brand_hash: Optional[str],
+    error_type: str,
+    error_source: str,
+    error_message: str = "",
+    context: Optional[dict] = None,
+) -> Optional[int]:
+    """Insert an error event. Returns row id or None.
+
+    error_type: tool_failure | api_timeout | empty_response | routing_override
+    error_source: tool name, agent name, or component identifier
+    """
+    if _pool is None:
+        return None
+    try:
+        row = await _pool.fetchrow(
+            """
+            INSERT INTO error_events
+                (user_id, brand_hash, error_type, error_source, error_message, context)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            RETURNING id
+            """,
+            user_id,
+            brand_hash,
+            error_type,
+            error_source,
+            error_message or "",
+            json.dumps(context or {}),
+        )
+        return row["id"] if row else None
+    except Exception as e:
+        logger.error("insert_error_event error: %s", e)
+        return None
+
+
+async def get_error_events(
+    brand_hash: Optional[str] = None,
+    error_type: Optional[str] = None,
+    days: int = 7,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    """Return paginated error events, optionally filtered by brand_hash and error_type."""
+    if _pool is None:
+        return []
+    try:
+        conditions = ["created_at >= NOW() - ($1 || ' days')::INTERVAL"]
+        params: list = [str(days)]
+        idx = 2
+
+        if brand_hash:
+            conditions.append(f"brand_hash = ${idx}")
+            params.append(brand_hash)
+            idx += 1
+        if error_type:
+            conditions.append(f"error_type = ${idx}")
+            params.append(error_type)
+            idx += 1
+
+        where = " AND ".join(conditions)
+        params.append(limit)
+        params.append(offset)
+
+        rows = await _pool.fetch(
+            f"""
+            SELECT id, user_id, brand_hash, error_type, error_source,
+                   error_message, context, created_at
+            FROM error_events
+            WHERE {where}
+            ORDER BY created_at DESC
+            LIMIT ${idx} OFFSET ${idx + 1}
+            """,
+            *params,
+        )
+        return [
+            {
+                "id": r["id"],
+                "user_id": r["user_id"],
+                "brand_hash": r["brand_hash"],
+                "error_type": r["error_type"],
+                "error_source": r["error_source"],
+                "error_message": r["error_message"],
+                "context": json.loads(r["context"]) if r["context"] else {},
+                "created_at": r["created_at"].isoformat(),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error("get_error_events error: %s", e)
+        return []
+
+
+async def get_error_summary(
+    brand_hash: Optional[str] = None,
+    days: int = 7,
+) -> dict:
+    """Return {error_type: count} aggregate for the last N days."""
+    if _pool is None:
+        return {}
+    try:
+        if brand_hash:
+            rows = await _pool.fetch(
+                """
+                SELECT error_type, COUNT(*) AS cnt
+                FROM error_events
+                WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
+                  AND brand_hash = $2
+                GROUP BY error_type
+                ORDER BY cnt DESC
+                """,
+                str(days),
+                brand_hash,
+            )
+        else:
+            rows = await _pool.fetch(
+                """
+                SELECT error_type, COUNT(*) AS cnt
+                FROM error_events
+                WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
+                GROUP BY error_type
+                ORDER BY cnt DESC
+                """,
+                str(days),
+            )
+        return {r["error_type"]: r["cnt"] for r in rows}
+    except Exception as e:
+        logger.error("get_error_summary error: %s", e)
+        return {}
+
+
+async def cleanup_old_error_events(days: int = 90) -> int:
+    """Delete error events older than N days. Returns count deleted."""
+    if _pool is None:
+        return 0
+    try:
+        result = await _pool.execute(
+            "DELETE FROM error_events WHERE created_at < NOW() - ($1 || ' days')::INTERVAL",
+            str(days),
+        )
+        # result is like "DELETE 42"
+        count = int(result.split()[-1]) if result else 0
+        if count:
+            logger.info("Cleaned up %d error events older than %d days", count, days)
+        return count
+    except Exception as e:
+        logger.error("cleanup_old_error_events error: %s", e)
+        return 0
+
+
 async def get_messages(thread_id: str, limit: int = 50) -> list[dict]:
     if _pool is None:
         return []

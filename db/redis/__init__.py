@@ -187,3 +187,11 @@ from db.redis.admin import (  # noqa: F401
     increment_session_cost,
     get_session_cost,
 )
+
+# Quality domain (Sprint 4)
+from db.redis.quality import (  # noqa: F401
+    compute_conversation_quality,
+    save_conversation_quality,
+    get_conversation_quality,
+    update_conversation_quality,
+)

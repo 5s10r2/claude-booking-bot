@@ -250,6 +250,33 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
     except Exception as e:
         logger.warning("property performance aggregation failed: %s", e)
 
+    # --- Quality distribution: scan brand users (Sprint 4) ---
+    quality_distribution = {"0-25": 0, "25-50": 0, "50-75": 0, "75-100": 0}
+    try:
+        from db.redis.quality import get_conversation_quality
+        q_uids = get_brand_active_users(brand_hash, offset=0, limit=500)
+        for q_uid in q_uids:
+            qd = get_conversation_quality(q_uid)
+            qs = qd.get("score")
+            if qs is not None:
+                if qs < 25:
+                    quality_distribution["0-25"] += 1
+                elif qs < 50:
+                    quality_distribution["25-50"] += 1
+                elif qs < 75:
+                    quality_distribution["50-75"] += 1
+                else:
+                    quality_distribution["75-100"] += 1
+    except Exception as e:
+        logger.warning("quality distribution scan failed: %s", e)
+
+    # --- Error summary (Sprint 4, PostgreSQL) ---
+    error_summary = {}
+    try:
+        error_summary = await pg.get_error_summary(brand_hash=brand_hash, days=days)
+    except Exception as e:
+        logger.warning("error summary failed: %s", e)
+
     return {
         # KPI cards
         "total_messages": total_messages,
@@ -269,6 +296,9 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
         "latency": latency_agg,
         # Property analytics (Sprint 3)
         "property_performance": property_perf,
+        # Quality + errors (Sprint 4)
+        "quality_distribution": quality_distribution,
+        "error_summary": error_summary,
         # Extended data (kept for backward compat)
         "funnel": funnel_totals,
         "feedback": feedback,
@@ -302,6 +332,7 @@ async def admin_conversations(
       filter: "needs_attention" — return only users with non-empty attention flags
     """
     from core.attention import get_attention_flags
+    from db.redis.quality import get_conversation_quality
 
     # Pull larger batch when filtering (need to scan then paginate)
     fetch_limit = max(limit * 4, 200) if filter == "needs_attention" else limit
@@ -330,6 +361,7 @@ async def admin_conversations(
                 break
 
         cost_data = get_session_cost(uid)
+        quality_data = get_conversation_quality(uid)
         rows.append({
             "uid": uid,
             "name": mem.get("profile_name") or mem.get("name") or "",
@@ -344,6 +376,7 @@ async def admin_conversations(
             "message_count": len(conv),
             "cost_inr": round(cost_data.get("cost_usd", 0.0) * 95, 2),
             "attention_flags": attention_flags,
+            "quality_score": quality_data.get("score"),
         })
 
     # When filtering, total is the filtered count and we paginate in-memory
@@ -388,6 +421,13 @@ async def admin_conversation_detail(uid: str, brand_hash: str = Depends(require_
     except Exception:
         attention_flags = []
 
+    # Conversation quality (Sprint 4)
+    try:
+        from db.redis.quality import get_conversation_quality
+        quality = get_conversation_quality(uid)
+    except Exception:
+        quality = {}
+
     return {
         "uid": uid,
         "messages": conv,
@@ -398,6 +438,7 @@ async def admin_conversation_detail(uid: str, brand_hash: str = Depends(require_
         "last_agent": last_agent,
         "followup_state": followup_state,
         "attention_flags": attention_flags,
+        "quality": quality,
     }
 
 
@@ -974,3 +1015,42 @@ async def admin_backfill_brands(brand_hash: str = Depends(require_admin_brand_ke
             status_code=500,
             content={"error": str(exc), "trace": traceback.format_exc()[-800:]},
         )
+
+
+# ---------------------------------------------------------------------------
+# Error events (Sprint 4)
+# ---------------------------------------------------------------------------
+
+@router.get("/admin/errors")
+async def admin_errors(
+    type: str = "",
+    days: int = 7,
+    limit: int = 50,
+    offset: int = 0,
+    brand_hash: str = Depends(require_admin_brand_key),
+):
+    """Return paginated error events with optional type filter.
+
+    Query params:
+      type: filter by error_type (tool_failure | api_timeout | empty_response | routing_override)
+      days: lookback window (default 7, max 90)
+      limit: page size (default 50)
+      offset: pagination offset
+    """
+    days = max(1, min(days, 90))
+    events = await pg.get_error_events(
+        brand_hash=brand_hash,
+        error_type=type or None,
+        days=days,
+        limit=limit,
+        offset=offset,
+    )
+    summary = await pg.get_error_summary(brand_hash=brand_hash, days=days)
+    return {
+        "events": events,
+        "summary": summary,
+        "total_in_window": sum(summary.values()),
+        "filters": {"type": type, "days": days},
+        "offset": offset,
+        "limit": limit,
+    }

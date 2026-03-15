@@ -105,6 +105,21 @@ class ToolExecutor:
             latency_ms = int((time.monotonic() - t0) * 1000)
             self._track(tool_name, False, latency_ms, user_id)
             logger.error("Error executing %s: %s", tool_name, e, exc_info=True)
+            # Fire-and-forget: log structured error event to PostgreSQL
+            try:
+                import asyncio
+                from db.postgres import insert_error_event
+                from db.redis_store import get_user_brand
+                asyncio.create_task(insert_error_event(
+                    user_id=user_id,
+                    brand_hash=get_user_brand(user_id),
+                    error_type="tool_failure",
+                    error_source=tool_name,
+                    error_message=str(e)[:500],
+                    context={"tool_input": {k: str(v)[:200] for k, v in tool_input.items()}, "latency_ms": latency_ms},
+                ))
+            except Exception:
+                pass
             return _build_fallback(tool_name, tool_input, user_id, str(e))
 
     @staticmethod

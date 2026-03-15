@@ -99,6 +99,20 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     if agent_name != original_agent:
         skills = []  # Safety net fired — skills from wrong agent are invalid
         track_routing_override(original_agent, agent_name, brand_hash=brand_hash)
+        # Fire-and-forget: log routing override as structured error event
+        try:
+            import asyncio
+            from db.postgres import insert_error_event
+            asyncio.create_task(insert_error_event(
+                user_id=user_id,
+                brand_hash=brand_hash,
+                error_type="routing_override",
+                error_source=f"{original_agent}>{agent_name}",
+                error_message=f"Safety net overrode {original_agent} to {agent_name}",
+                context={"message": message[:200]},
+            ))
+        except Exception:
+            pass
 
     if agent_name == "broker" and not skills:
         from skills.skill_map import detect_skills_heuristic
@@ -126,18 +140,36 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     latency_ms = int((time.monotonic() - t0) * 1000)
     track_response_latency(agent_name, latency_ms, brand_hash=brand_hash)
 
+    # Log empty responses as structured error events
+    if not response or not response.strip():
+        try:
+            import asyncio
+            from db.postgres import insert_error_event
+            asyncio.create_task(insert_error_event(
+                user_id=user_id,
+                brand_hash=brand_hash,
+                error_type="empty_response",
+                error_source=agent_name,
+                error_message="Agent returned empty response",
+                context={"latency_ms": latency_ms, "message": message[:200]},
+            ))
+        except Exception:
+            pass
+
     # Track last active agent for multi-turn continuations
     set_last_agent(user_id, agent_name)
 
     # Save assistant response to history
     state.conversation.add_assistant_message(user_id, response, brand_hash=brand_hash)
 
-    # Compute + cache attention flags (fire-and-forget — never break main flow)
+    # Compute + cache attention flags + conversation quality (fire-and-forget)
     try:
-        from core.attention import update_attention_flags
         conv = get_conversation(user_id)
         mem = get_user_memory(user_id)
+        from core.attention import update_attention_flags
         update_attention_flags(user_id, conv, mem, brand_hash=brand_hash)
+        from db.redis.quality import update_conversation_quality
+        update_conversation_quality(user_id, conv, mem)
     except Exception:
         pass
 
