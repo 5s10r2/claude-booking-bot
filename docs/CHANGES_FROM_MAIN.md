@@ -2,8 +2,8 @@
 
 **For:** Developer review
 **Branches:** `main` (production, live on Render) → `feat/dynamic-skills` → `feat/context-engineering`
-**Total:** 28 files changed · 2,268 insertions · 90 deletions across 4 commits
-**One-line summary:** A new dynamic skill-loading system for the broker agent (Sprint 1), followed by 7 context reliability fixes (Sprint 2). The codebase is fully backward-compatible — one env flag rolls everything back instantly.
+**Total changes:** Sprints 1-2 (Feb 2026): 28 files, 2,268 insertions, 90 deletions. Sprints 3-7 (March 2026): 50+ files, 5,000+ insertions covering multi-brand isolation, admin portal, WhatsApp multi-turn handling, feature flags, and production hardening.
+**One-line summary:** A dynamic skill system for the broker agent (Sprint 1), context reliability fixes (Sprint 2), multi-brand isolation with admin portal (Sprints 3-6), and WhatsApp multi-turn message handling (Sprint 7). All changes are backward-compatible with feature flags for instant rollback.
 
 ---
 
@@ -327,23 +327,22 @@ Updated `build_skill_prompt()` docstring to explain why the Haiku prompt caching
 
 ---
 
-## What was NOT changed
+## What was NOT changed (Sprints 1-2 only)
 
-These files are identical to production (`main`):
+These files were identical to production at the end of Sprint 2 (later sprints modified some of these — see Sprint 3+ sections below):
 
-- All booking tools (`tools/booking/`)
-- All broker tools (`tools/broker/`) — the Python tool logic is untouched
+- All booking tools (`tools/booking/`) — later modified in Sprint 5 (API audit)
+- All broker tools (`tools/broker/`) — the Python tool logic was untouched in Sprints 1-2
 - All profile tools (`tools/profile/`)
-- All other agents (`agents/booking_agent.py`, `agents/profile_agent.py`, `agents/default_agent.py`, `agents/room_agent.py`)
+- All other agents (`agents/booking_agent.py`, `agents/profile_agent.py`, `agents/default_agent.py`)
 - WhatsApp channel (`channels/whatsapp.py`)
-- Frontend (`eazypg-chat/` — entire directory)
-- Conversation manager (`core/conversation.py`)
+- Frontend (`eazypg-chat/` — entire directory) — later enhanced in Sprint 3 (Generative UI) and Sprint 8 (Phase A interrupt)
+- Conversation manager (`core/conversation.py`) — later updated for brand_hash threading
 - Rate limiter (`core/rate_limiter.py`)
 - Message parser (`core/message_parser.py`)
 - Router / keyword safety net (`core/router.py`)
 - Language detection (`core/language.py`)
-- All database schema — no migrations, no new tables
-- No new environment variables required (beyond `DYNAMIC_SKILLS_ENABLED` which defaults to `true`)
+- No new environment variables required in Sprints 1-2 (beyond `DYNAMIC_SKILLS_ENABLED`)
 
 ---
 
@@ -382,3 +381,234 @@ This reverts the broker agent to the original monolithic prompt and all 12 tools
 **The case against it:** It adds conceptual overhead. A developer joining the project now needs to understand skills, the loader, the skill map, and the supervisor's new return format — before they can change how the broker behaves. If the team is small and the bot is working, adding complexity for marginal gains is a reasonable thing to push back on.
 
 **What you can do:** If your developer is uncomfortable, flip `DYNAMIC_SKILLS_ENABLED=false`. The bot runs exactly as it did before PR #1. The skill files, loader, and skill map sit dormant and do nothing. Sprint 2's improvements are all still active.
+
+---
+---
+
+## Sprint 3 — Admin Portal + Human Takeover (March 2026)
+_Deployed to production on Render + Vercel_
+
+### What changed
+
+A full admin portal (`eazypg-admin/`) and backend admin endpoints were added. The admin portal is a separate Vercel project with conversation browser, lead pipeline, analytics dashboard, property document management, and settings panel.
+
+#### Backend: Router refactoring
+The monolithic `main.py` (formerly 700+ lines) was split into a clean router package:
+
+| New file | Purpose |
+|----------|---------|
+| `routers/__init__.py` | Package init |
+| `routers/public.py` | `/health`, `/brand-config` (no auth) |
+| `routers/chat.py` | `/chat`, `/chat/stream`, `/feedback`, `/funnel`, `/language` |
+| `routers/webhooks.py` | `/webhook/whatsapp`, `/webhook/payment`, `/cron/follow-ups` |
+| `routers/admin.py` | All `/admin/*` endpoints (20+ routes) |
+
+`main.py` is now 129 lines — just app factory + lifespan.
+
+#### Backend: Redis refactoring
+The monolithic `db/redis_store.py` (formerly 600+ lines) was split into 8 domain modules:
+
+| Module | Domain |
+|--------|--------|
+| `db/redis/_base.py` | Connection pool, helpers |
+| `db/redis/conversation.py` | History, compaction, last-agent |
+| `db/redis/user.py` | Memory, preferences, shortlist, lead score |
+| `db/redis/property.py` | Property cache, images, templates |
+| `db/redis/payment.py` | Payment state, active request |
+| `db/redis/analytics.py` | Funnel, feedback, agent/skill usage, costs |
+| `db/redis/brand.py` | Brand config, WA reverse-lookup, flags |
+| `db/redis/admin.py` | Active users, human mode, session cost |
+
+`db/redis_store.py` is now a backward-compat shim (`from db.redis import *`).
+
+#### Backend: New shared modules
+| File | Purpose |
+|------|---------|
+| `core/auth.py` | `require_admin_brand_key` — brand-scoped auth for all admin endpoints |
+| `core/pipeline.py` | `run_pipeline()` — shared pipeline used by both chat and WhatsApp |
+| `core/state.py` | Shared singletons (engine, conversation) — eliminates circular imports |
+| `core/router.py` | 3-phase keyword safety net (extracted from pipeline) |
+| `core/ui_parts.py` | Generative UI parts (quick_replies, action_buttons, expandable_sections) |
+| `utils/api.py` | Rentok API response validation |
+| `utils/property_docs.py` | KB document formatting for broker prompt |
+
+#### Backend: Human takeover
+Admins can take over conversations from the bot:
+- `POST /admin/conversations/{uid}/takeover` — sets human mode, bot stops responding
+- `POST /admin/conversations/{uid}/resume` — clears human mode, bot resumes
+- `POST /admin/conversations/{uid}/message` — send admin message via WhatsApp + auto-resume
+
+#### Backend: Property documents
+Knowledge base injection via file upload:
+- Upload documents per property (`POST /admin/properties/{prop_id}/documents`)
+- Documents stored in PostgreSQL (`property_documents` table)
+- Content injected into broker prompt via `get_property_documents_text()`
+
+#### Frontend: Admin portal (`eazypg-admin/`)
+5 pages: Conversations (two-pane browser), Leads (filterable pipeline), Analytics (KPI cards + charts), Properties (document management), Settings (feature flags + broadcast).
+
+#### Frontend: Chat widget enhancements
+- Generative UI: 10 component types rendered from backend `parts[]` in SSE `done` event
+- Property cards with match score badges and amenity pills
+- Expandable sections (FAQ, rules, amenities) with pop-in animation
+- Skeleton loaders, celebration animations, stagger transitions
+
+---
+
+## Sprint 4 — Production Bug Fixes (March 2026)
+_Commit `47792bf` — deployed to Render production_
+
+Analyzed 80 conversations in Redis. Found 10 bug patterns, applied 5 targeted fixes:
+
+| Bug | Fix |
+|-----|-----|
+| Text concatenation (pre-tool + post-tool text glued together) | Fixed content delta accumulation in streaming |
+| Bot silent after human takeover (4 consecutive empty responses) | Fixed human mode check ordering in pipeline |
+| Disambiguation loop (same property list asked 4 times) | Improved context injection for follow-up turns |
+| Payment retry loop (identical reserve+payment run twice) | Added idempotency check on payment state |
+| Phone gate bypass via conversation summary | Summary now preserves accurate phone collection status |
+
+---
+
+## Sprint 5 — Fire-and-Forget API Audit (March 2026)
+_Commit `92c372b` — deployed to Render production_
+
+Audited all booking tools for silent CRM failures. 4 tools had fire-and-forget API calls that could fail silently:
+
+| File | Fix |
+|------|-----|
+| `tools/booking/schedule_call.py` | Fixed `and`-bug in success check + track lead creation result |
+| `tools/booking/payment.py` | Track `addLeadFromEazyPGID` result; always clear payment state; partial-failure message |
+| `tools/broker/shortlist.py` | Add response body validation; only track funnel on confirmed success |
+| `tools/booking/cancel.py` | Remove dead code (unreachable block after `raise_for_status()`) |
+
+**Pattern applied consistently:** `if not data.get("success"):` check (no `and` clause), secondary CRM calls tracked with bool flag, `logger.error` for post-success CRM failures, state cleanup always happens.
+
+---
+
+## Sprint 6 — Multi-Brand Isolation (March 2026)
+_3-phase implementation, all deployed to production_
+
+### The problem
+All brands shared one data namespace. OxOtel admin could see Stanza conversations. Analytics were aggregated across all brands. Feature flags were global.
+
+### The solution: `brand_hash = sha256(api_key)[:16]`
+Each brand gets a unique API key. The SHA-256 hash of the key (truncated to 16 chars) is used as a namespace prefix for all brand-scoped data. The raw API key is never stored.
+
+### Phase 1: Core isolation
+- All admin endpoints use `require_admin_brand_key` (validates API key → returns `brand_hash`)
+- Users tagged with `brand_hash` on first message (`set_user_brand`)
+- Active users tracked per-brand (`active_users:{brand_hash}` sorted set)
+- Conversation list, thread view, leads, analytics — all filtered by `brand_hash`
+- Property document ownership checks (prop_id must be in brand's `pg_ids`)
+
+### Phase 2A: Per-brand feature flags
+- `brand_flags:{brand_hash}` Redis key stores per-brand overrides
+- `get_effective_flags(brand_hash)` merges brand overrides over global defaults from `config.py`
+- Admin panel shows effective flags; toggles update brand-scoped key only
+- Prompts resolve flags at request time via `format_prompt()`
+
+### Phase 2B: Per-brand analytics + PostgreSQL
+- ALL 12 analytics functions (`track_funnel`, `track_agent_usage`, `save_feedback`, etc.) dual-write to global + brand-scoped keys
+- Admin endpoints read from brand-scoped keys; debug/global views read global keys
+- PostgreSQL `booking_messages` + `leads` tables: `brand_hash` column added (idempotent migration on startup)
+- Brand-scoped Redis keys: `funnel:{brand_hash}:{day}`, `agent_usage:{brand_hash}:{day}`, `skill_usage:{brand_hash}:{day}`, `agent_cost:{brand_hash}:{day}`, `daily_cost:{brand_hash}:{day}`, `feedback:counts:{brand_hash}`
+
+### Phase 3: Polish
+- Human mode scoped to `{uid}:{brand_hash}:human_mode` (with global fallback for backward compat)
+- Brand context injected into conversation summarization prompt
+- Admin portal sidebar shows dynamic brand name
+- Brand configs auto-seed on startup (`_SEED_BRANDS` in `main.py`)
+
+---
+
+## Sprint 7 — PAYMENT_REQUIRED Feature Flag (March 2026)
+_Commit `a4293a5` — deployed to Render production_
+
+### The problem
+The booking flow always required payment before reservation, but some brands want to skip payment and go directly to bed reservation.
+
+### The solution: `PAYMENT_REQUIRED=false` (default)
+When false, the booking prompt tells the agent to skip payment and call `reserve_bed` directly after visit. Payment tools (`create_payment_link`, `verify_payment`) are not registered in the tool set.
+
+| File | Change |
+|------|--------|
+| `config.py` | Added `PAYMENT_REQUIRED: bool = False` |
+| `tools/registry.py` | `_PAYMENT_TOOLS` conditional registration (same pattern as `_KYC_TOOLS`) |
+| `tools/booking/reserve.py` | 4-way dynamic tool description based on KYC + Payment flags |
+| `core/prompts.py` | 4-branch `kyc_reservation_flow` + 3 template vars in `format_prompt()` |
+| `skills/broker/selling.md` | Hardcoded token lines → `{token_value_line}` template var |
+| `routers/admin.py` | Fixed admin flags payload bug (Pydantic → raw JSON parsing) |
+
+**Admin flags bug fix (pre-existing):** Frontend sent `{ key, value }` but Pydantic expected `{ FLAG: value }`. Silently ignored → no flag ever updated. Fixed by accepting both formats.
+
+---
+
+## Sprint 8 — WhatsApp Multi-Turn Message Handling (March 2026)
+_Backend `c5f89b0` + Frontend `4f97f41` — deployed to production_
+
+### The problem
+Users send multiple WhatsApp messages in quick succession. Each message triggered a separate pipeline run, causing race conditions, duplicate responses, and wasted API calls.
+
+### The solution: 3-phase handling
+
+**Phase A — Web frontend: Interrupt-on-send**
+- `AbortController` + `requestCounter` pattern in `stream.js`
+- New message cancels any in-flight request; partial response gets amber "interrupted" badge
+- Stop button added to input bar
+
+**Phase B — WhatsApp: Queue + debounce**
+- Webhook returns 200 immediately (non-blocking)
+- Messages pushed to Redis list (`{uid}:wa_queue`)
+- `_drain_and_process()` async task debounces 2 seconds, then drains all queued messages into one pipeline call
+- Per-user lock (`{uid}:wa_processing`) prevents duplicate drain tasks
+- wamid-based dedup replaces text-based dedup (`wamid:{wamid}`, 24h TTL)
+
+**Phase C — Pipeline cancellation**
+- If new messages arrive while pipeline is running, `set_cancel_requested(uid)` is called
+- `core/claude.py` checks `is_cancel_requested()` between tool-call iterations
+- Pipeline returns early; drain task loops back with fresh message batch
+
+### New Redis keys
+| Key | TTL | Purpose |
+|-----|-----|---------|
+| `wamid:{wamid}` | 24h | Message dedup by Meta unique ID |
+| `{uid}:wa_queue` | 5 min | Pending message accumulation |
+| `{uid}:wa_processing` | 2 min | Per-user drain lock |
+| `{uid}:cancel_requested` | 30s | Pipeline cancellation signal |
+
+### Config values (`config.py`)
+`WA_DEBOUNCE_SECONDS=2.0`, `WAMID_DEDUP_TTL=86400`, `WA_QUEUE_TTL=300`, `WA_PROCESSING_TTL=120`
+
+---
+
+## Sprint 9 — Stress Test Resilience (March 2026)
+_Commit `47792bf` — deployed to production_
+
+Three-layer fix for 4 stress test failures (S01, S14, S19, E1/C5):
+
+| Layer | Fix | Files |
+|-------|-----|-------|
+| Test infra | Server warmup + auto-retry on transient errors | `stress_test_broker_prod.py` |
+| Prompts | DISSATISFACTION sentiment category + empathy never-rule | `selling.md`, `_base.md` |
+| Tool runtime | 30s aggregate timeout + vague destination blocklist | `landmarks.py`, `commute.md` |
+| E2E tests | 120s timeout for multi-turn tests | `e2e.spec.js` |
+
+**Result:** Stress test improved from 10/6/4 (PASS/WARN/FAIL) to 13/5/2. Remaining 2 failures (S04, S08) are Haiku model stochasticity — pass on retry.
+
+---
+
+## What was NOT changed (still same as original production)
+
+These files/systems remain untouched from the original `main` branch:
+- `core/language.py` — language detection logic (en/hi/mr)
+- `core/rate_limiter.py` — sliding window rate limiting
+- `core/message_parser.py` — markdown → WhatsApp parts parsing
+- `channels/whatsapp.py` — WhatsApp send logic (Meta/Interakt APIs)
+- `utils/date.py` — date parsing
+- `utils/image.py` — image conversion + WA upload
+- `utils/scoring.py` — property match scoring
+- `data/transit_lines.json` — metro/transit line data
+- All Rentok API contracts — same endpoints, same payloads
+- Redis conversation format — same JSON structure
+- Frontend core rendering — same markdown parsing, carousel, comparison table logic

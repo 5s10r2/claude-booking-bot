@@ -1,6 +1,6 @@
-# OxOtel AI Booking Bot — Backend
+# EazyPG AI Booking Bot — Backend
 
-> AI-powered PG (Paying Guest) booking assistant with multi-agent architecture, Generative UI, and dual-channel support (Web + WhatsApp).
+> Multi-tenant, multi-channel conversational AI assistant for PG (Paying Guest) booking in India. Powered by Claude (Anthropic), deployed on Render, with Web + WhatsApp channels.
 
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white)
 ![Claude](https://img.shields.io/badge/Claude_AI-191919?style=flat&logo=anthropic&logoColor=white)
@@ -8,11 +8,15 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat&logo=postgresql&logoColor=white)
 ![Render](https://img.shields.io/badge/Render-46E3B7?style=flat&logo=render&logoColor=white)
 
+**Last updated**: 2026-03-15
+
 ---
 
 ## What It Does
 
 A full-stack conversational AI assistant that helps users find, compare, and book PG accommodations across Indian cities. Four specialized AI agents handle different aspects of the booking journey — from property search and comparison to visit scheduling and payment — powered by Claude Sonnet and Haiku models. The backend decides what UI to render (Generative UI pattern), and the frontend is a lightweight component registry that renders structured parts.
+
+**Multi-tenant**: Each brand operator (OxOtel, Stanza, Zelter) gets their own API key, property scope, feature flags, analytics, and shareable chatbot URL. All data is isolated at the Redis key prefix level using `sha256(api_key)[:16]` as brand hash.
 
 ---
 
@@ -20,18 +24,21 @@ A full-stack conversational AI assistant that helps users find, compare, and boo
 
 - **Multi-Agent AI** — Supervisor routes to 4 specialized agents: Broker, Booking, Profile, Default
 - **Dynamic Skill System** — Broker agent loads only the skills/tools needed per turn (12 `.md` skill files, hot-reloadable, 30s cache)
+- **Multi-Brand Isolation** — Per-brand data, analytics (dual-write), feature flags, human mode, and admin scoping
 - **Property Search & Comparison** — Geocoded search, match scoring, side-by-side comparison tables
-- **Visit Scheduling & Payments** — Schedule visits, reserve beds, create payment links
-- **Generative UI** — Backend-controlled rich components (carousels, status cards, galleries, confirmation cards)
-- **Dual Channel** — Web chat (SSE streaming) + WhatsApp (Meta/Interakt APIs)
-- **Human Mode** — Admin can take over any conversation; AI is fully bypassed across all three pipeline paths (SSE, JSON, WhatsApp webhook) while conversation history is preserved
+- **Visit Scheduling & Payments** — Schedule visits, reserve beds, create payment links (payment optional via `PAYMENT_REQUIRED` flag)
+- **Generative UI** — Backend-controlled rich components (carousels, status cards, galleries, confirmation cards, expandable sections)
+- **Dual Channel** — Web chat (SSE streaming with AbortController interrupt) + WhatsApp (Meta/Interakt APIs with multi-turn queue)
+- **WhatsApp Multi-Turn** — Phase B+C: wamid dedup, Redis queue, 2s debounce, pipeline cancellation on new messages
+- **Human Mode** — Admin can take over any conversation (brand-scoped); AI is fully bypassed while conversation history is preserved
 - **Multilingual** — English, Hindi, Marathi with locale-aware UI
 - **Voice Input** — Deepgram Nova-3 speech-to-text in all 3 languages
-- **Smart Memory** — Cross-session user preferences, implicit feedback, conversation summarization
+- **Smart Memory** — Cross-session user preferences, implicit feedback, conversation summarization (with brand context)
 - **Web Intelligence** — Live web search for area insights and market data
 - **Property Maps** — Leaflet maps with property pins, commute estimation via OSRM
 - **Lead Scoring** — Automated lead qualification based on engagement signals
 - **Property Documents KB** — Upload PDFs/XLSX/CSV/TXT per property; content injected into broker prompt
+- **Per-Brand Feature Flags** — KYC_ENABLED, PAYMENT_REQUIRED, DYNAMIC_SKILLS_ENABLED — toggleable per brand at runtime
 
 ---
 
@@ -45,17 +52,17 @@ A full-stack conversational AI assistant that helps users find, compare, and boo
                                  │ SSE /chat/stream
                           ┌──────▼───────┐       ┌──────────────┐
   WhatsApp ──webhook──►   │   FastAPI    │◄─────►│    Redis     │
-                          │   main.py    │       │  (state,     │
+                          │  (routers/)  │       │  (state,     │
                           └──────┬───────┘       │   cache,     │
-                                 │               │   memory)    │
-                          ┌──────▼───────┐       └──────────────┘
-                          │  Supervisor  │
-                          │  (routing)   │       ┌──────────────┐
-                          └──────┬───────┘       │  PostgreSQL  │
-                     ┌───────────┼──────────┐    │  (msg logs)  │
-                     ▼           ▼          ▼    └──────────────┘
-               ┌──────────┐ ┌────────┐ ┌─────────┐
-               │  Broker  │ │Booking │ │ Profile  │  + Default
+                                 │               │   analytics, │
+                          ┌──────▼───────┐       │   brands)    │
+                          │  Supervisor  │       └──────────────┘
+                          │  (routing)   │
+                          └──────┬───────┘       ┌──────────────┐
+                     ┌───────────┼──────────┐    │  PostgreSQL  │
+                     ▼           ▼          ▼    │  (msg logs,  │
+               ┌──────────┐ ┌────────┐ ┌─────────┐ leads)     │
+               │  Broker  │ │Booking │ │ Profile  │  + Default  └──────────────┘
                │ (Haiku)  │ │(Sonnet)│ │ (Sonnet) │
                └────┬─────┘ └───┬────┘ └────┬────┘
                     │            │            │
@@ -86,6 +93,17 @@ Supervisor → { "agent": "broker", "skills": ["search", "selling"] }
                      Tools filtered to match skills (3-5 vs 12 full set)
 ```
 
+**Multi-Brand Isolation:**
+
+```
+API key (e.g. "oxotel-uat-2026")
+  → sha256(key)[:16] = brand_hash (Redis prefix for all brand-scoped data)
+  → Raw API key NEVER stored in Redis or logs
+  → All admin endpoints use require_admin_brand_key → scoped to brand's data
+  → Analytics dual-write: global + brand_hash-scoped keys
+  → Feature flags: global defaults merged with brand overrides
+```
+
 **Generative UI Pattern:**
 
 The backend returns structured `parts[]` in the SSE `done` event. The frontend maps each part type to a renderer:
@@ -101,8 +119,10 @@ parts: [
 PART_RENDERERS = {
   text → renderTextPart()
   property_carousel → renderPropertyCarousel()
+  comparison_table → renderComparisonTable()
   quick_replies → renderQuickReplies()
-  ...7 more types
+  action_buttons, status_card, image_gallery,
+  confirmation_card, error_card, expandable_sections
 }
 ```
 
@@ -112,15 +132,15 @@ PART_RENDERERS = {
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
-| **AI** | Claude Sonnet 4.6, Claude Haiku 4.5 | Agent reasoning (Sonnet for most, Haiku for broker) |
+| **AI** | Claude Sonnet 4.6, Claude Haiku 4.5 | Agent reasoning (Sonnet for most, Haiku for broker/supervisor) |
 | **Backend** | FastAPI, Python 3.11+ | API server, SSE streaming, webhook handlers |
-| **Cache/State** | Redis | Conversations, preferences, property cache, rate limits, analytics |
-| **Database** | PostgreSQL | Message logging, property documents |
-| **Frontend** | Vanilla JS, Vite | Chat UI, component registry, voice input |
+| **Cache/State** | Redis | Conversations, preferences, property cache, rate limits, analytics, brand config |
+| **Database** | PostgreSQL | Message logging, leads, property documents |
+| **Frontend** | Vanilla JS, Vite 6 | Chat UI, component registry, voice input |
+| **Admin** | React 19, TypeScript, TanStack Query, shadcn/ui | Admin portal for brand operators |
 | **Maps** | Leaflet, OSRM | Property maps, commute estimation |
-| **Markdown** | Marked.js | Bot message rendering |
 | **Voice** | Deepgram Nova-3 | Speech-to-text (en/hi/mr) |
-| **Hosting** | Render (backend), Vercel (frontend) | Auto-deploy from git |
+| **Hosting** | Render (backend), Vercel (frontends) | Auto-deploy from git |
 | **WhatsApp** | Meta Cloud API / Interakt | WhatsApp channel |
 
 ---
@@ -129,48 +149,86 @@ PART_RENDERERS = {
 
 ```
 claude-booking-bot/
-├── main.py                  # App entry + all endpoints (~900 lines)
-├── config.py                # Pydantic settings
+├── main.py                  # FastAPI app factory + lifespan (129 lines)
+├── config.py                # Pydantic settings, feature flags, model IDs
 ├── requirements.txt         # Python dependencies
 ├── build.sh                 # Render build script
+├── CLAUDE.md                # Complete file map with line numbers + task recipes
 ├── agents/                  # AI agent configs
 │   ├── supervisor.py        # Intent routing → {agent, skills[]}
 │   ├── broker_agent.py      # Property search/compare (dual-path: dynamic skills vs legacy)
 │   ├── booking_agent.py     # Visits, payments, reservations
 │   ├── profile_agent.py     # User preferences
 │   └── default_agent.py     # Greetings, general help
+├── routers/                 # FastAPI route modules
+│   ├── public.py            # GET /health, GET /brand-config
+│   ├── chat.py              # POST /chat, POST /chat/stream, POST /feedback, POST /language
+│   ├── webhooks.py          # WhatsApp webhook, payment webhook, cron follow-ups
+│   └── admin.py             # All /admin/* endpoints (brand-scoped via require_admin_brand_key)
 ├── core/                    # Engine
-│   ├── claude.py            # Anthropic API wrapper (split prompt caching)
-│   ├── prompts.py           # All system prompts (13 modular broker sections)
+│   ├── claude.py            # Anthropic API wrapper (split prompt caching, cancellation checkpoint)
+│   ├── prompts.py           # All system prompts (feature-flag-driven template vars)
+│   ├── pipeline.py          # Shared pipeline: run_pipeline() for chat + WhatsApp
+│   ├── auth.py              # Auth helpers: require_admin_brand_key, require_brand_api_key
+│   ├── state.py             # Shared singletons (engine, conversation)
 │   ├── ui_parts.py          # Generative UI part generation
 │   ├── message_parser.py    # Response → structured parts
-│   ├── conversation.py      # History management + compaction
-│   ├── summarizer.py        # Hierarchical token-aware summarization
+│   ├── conversation.py      # History management + compaction (brand-aware)
+│   ├── summarizer.py        # Hierarchical token-aware summarization (brand context)
 │   ├── rate_limiter.py      # Sliding-window rate limits
-│   ├── router.py            # Keyword safety net (3-phase)
+│   ├── router.py            # Keyword safety net (3-phase: phrases→words→last_agent)
 │   └── tool_executor.py     # Tool dispatch + graceful skill fallback
 ├── tools/                   # Tool implementations
-│   ├── broker/              # search, compare, details, images, landmarks, shortlist
-│   ├── booking/             # payment, schedule_visit, reserve, cancel, kyc
+│   ├── broker/              # search, compare, details, images, landmarks, shortlist, preferences, nearby, commute, query
+│   ├── booking/             # payment, schedule_visit, schedule_call, reserve, cancel, reschedule, kyc, save_phone
 │   ├── profile/             # user details, events, shortlisted
+│   ├── default/             # brand_info
 │   ├── common/              # web_search
-│   └── registry.py          # Tool registration for all agents (28 tools, strict schemas)
+│   └── registry.py          # Tool registration (28 tools, strict schemas, conditional payment/KYC tools)
 ├── skills/                  # Dynamic skill system (broker agent only)
-│   ├── loader.py            # Skill file loading + YAML frontmatter + hot-reload
+│   ├── loader.py            # Skill file loading + YAML frontmatter + hot-reload (30s cache)
 │   ├── skill_map.py         # Skill→tool mapping + keyword fallback
 │   └── broker/              # 12 .md skill files (_base, search, details, compare, …)
 ├── db/                      # Data layer
-│   ├── redis_store.py       # All Redis operations
-│   └── postgres.py          # PostgreSQL logging + property_documents table
+│   ├── redis/               # Redis domain package (8 modules, ~1,279 lines)
+│   │   ├── _base.py         # Connection pool, helpers
+│   │   ├── conversation.py  # History, wamid dedup, WA queue, pipeline cancel
+│   │   ├── user.py          # Memory, preferences, shortlist, followups, lead score
+│   │   ├── property.py      # Property cache, images, templates
+│   │   ├── payment.py       # Payment link + active request dedup
+│   │   ├── analytics.py     # Funnel, feedback, usage, costs (dual-write: global + brand)
+│   │   ├── brand.py         # Brand config, WA reverse-lookup, per-brand flags
+│   │   └── admin.py         # Active users, human mode (brand-scoped), session cost
+│   ├── redis_store.py       # Backward-compat shim (re-exports from db/redis/)
+│   └── postgres.py          # Message logging + leads + property docs (brand_hash column)
 ├── channels/
-│   └── whatsapp.py          # WhatsApp send (Meta/Interakt)
-└── utils/                   # Helpers
-    ├── scoring.py           # Property match scoring (weighted, fuzzy amenity)
-    ├── geo.py               # Shared geocoding helper
-    ├── date.py              # Date/time parsing
-    ├── image.py             # Image processing (WEBP→JPEG for WhatsApp)
-    └── retry.py             # Async retry decorator
+│   └── whatsapp.py          # WhatsApp send (Meta/Interakt dual support)
+├── utils/                   # Helpers
+│   ├── scoring.py           # Property match scoring (weighted, fuzzy amenity)
+│   ├── geo.py               # Shared geocoding helper
+│   ├── date.py              # Date/time parsing
+│   ├── image.py             # Image processing (WEBP→JPEG for WhatsApp)
+│   ├── retry.py             # Async retry decorator (2 retries, exponential backoff)
+│   ├── properties.py        # Shared property lookup (exact + substring match)
+│   ├── api.py               # Rentok API response validation
+│   └── property_docs.py     # KB document formatting for prompt injection
+├── data/
+│   └── transit_lines.json   # Metro/transit lines (Mumbai/Bangalore/Delhi/Pune)
+├── docs/                    # Documentation
+│   ├── ARCHITECTURE.md      # Deep reference: Redis keys, Rentok API, agent-tool mapping
+│   ├── DIRECTORY.md         # Canonical operating document (18 sections)
+│   ├── CHANGES_FROM_MAIN.md # Change log
+│   └── screenshots/         # 20 UI screenshots
+└── tests                    # E2E tests (all require live backend)
+    ├── stress_test_broker.py      # 20-scenario broker regression
+    ├── stress_test_broker_prod.py # Same, against production URL
+    ├── test_comprehensive.py      # 16-tool comprehensive test
+    ├── test_dynamic_skills.py     # 8-scenario dynamic skill E2E
+    ├── test_fixed_tools.py        # Fixed tools regression
+    └── test_full_integration.py   # Full integration suite
 ```
+
+> **For the complete file map with line numbers**, see `CLAUDE.md`. For deep dives into Redis keys, Rentok API params, or agent-tool mapping, see `docs/ARCHITECTURE.md`.
 
 ---
 
@@ -208,30 +266,38 @@ uvicorn main:app --reload --port 8000
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ANTHROPIC_API_KEY` | Yes | — | Claude API key |
-| `REDIS_URL` | No | — | Redis connection URL (or use REDIS_HOST/PORT) |
-| `REDIS_HOST` | No | `localhost` | Redis host (fallback) |
-| `REDIS_PORT` | No | `6379` | Redis port (fallback) |
-| `DATABASE_URL` | No | — | PostgreSQL URL (or use DB_HOST/NAME/USER/PASSWORD/PORT) |
+| `REDIS_URL` | Yes | — | Redis connection URL |
+| `DATABASE_URL` | Yes | — | PostgreSQL connection URL |
 | `RENTOK_API_BASE_URL` | No | `https://apiv2.rentok.com` | Rentok property API |
-| `WHATSAPP_ACCESS_TOKEN` | No | — | Meta WhatsApp API token |
+| `API_KEY` | No | — | Admin endpoint auth (disabled if empty) |
+| `WHATSAPP_VERIFY_TOKEN` | No | `booking-bot-verify` | Meta webhook verification token |
 | `TAVILY_API_KEY` | No | — | Tavily web search API key |
 | `OSRM_API_KEY` | No | — | OSRM routing API key (commute estimation) |
-| `API_KEY` | No | — | API authentication (disabled if empty) |
-| `HAIKU_MODEL` | No | `claude-haiku-4-5-20251001` | Broker agent model |
+| `CHAT_BASE_URL` | No | `https://eazypg-chat.vercel.app` | Chatbot URL for brand config response |
+| `HAIKU_MODEL` | No | `claude-haiku-4-5-20251001` | Broker/supervisor model |
 | `SONNET_MODEL` | No | `claude-sonnet-4-6` | Other agents model |
 | `KYC_ENABLED` | No | `false` | Enable Aadhaar verification |
-| `DYNAMIC_SKILLS_ENABLED` | No | `true` | Use dynamic skill system for broker (false = legacy monolithic prompt) |
+| `PAYMENT_REQUIRED` | No | `false` | Require payment before reservation (false = skip payment step) |
+| `DYNAMIC_SKILLS_ENABLED` | No | `true` | Dynamic skill system (false = legacy monolithic prompt) |
 | `WEB_SEARCH_MAX_PER_CONVERSATION` | No | `3` | Max web search calls per conversation |
+| `WA_DEBOUNCE_SECONDS` | No | `2.0` | WhatsApp multi-turn queue debounce |
+| `WAMID_DEDUP_TTL` | No | `86400` | WhatsApp message dedup TTL (seconds) |
 
 ---
 
 ## API Endpoints
 
-### Chat
+### Public
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Health check |
+| `GET` | `/brand-config?token={uuid}` | Public brand config (no auth — safe fields only) |
+
+### Chat
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `POST` | `/chat` | Synchronous chat (JSON response) |
 | `POST` | `/chat/stream` | SSE streaming chat (primary web endpoint) |
 | `POST` | `/feedback` | Submit user feedback (thumbs up/down) |
@@ -244,29 +310,33 @@ uvicorn main:app --reload --port 8000
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/webhook/whatsapp` | WhatsApp incoming messages |
+| `POST` | `/webhook/whatsapp` | WhatsApp incoming (wamid dedup → queue → drain) |
 | `GET` | `/webhook/whatsapp` | WhatsApp webhook verification |
 | `POST` | `/webhook/payment` | Payment callback from Rentok |
+| `POST` | `/cron/follow-ups` | Scheduled follow-up messages |
 
-### Admin Portal
+### Admin (all brand-scoped via `require_admin_brand_key`)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/admin/conversations` | Paginated conversation list with metadata |
+| `GET` | `/admin/conversations` | Paginated conversation list |
 | `GET` | `/admin/conversations/{uid}` | Full thread + memory + cost + human_mode |
-| `POST` | `/admin/conversations/{uid}/takeover` | Activate human mode (AI bypassed) |
-| `POST` | `/admin/conversations/{uid}/resume` | Deactivate human mode (AI resumes) |
-| `POST` | `/admin/conversations/{uid}/message` | Send admin message via WhatsApp + save to history |
-| `GET` | `/admin/command-center` | Today's KPIs (messages, leads, visits, active users) |
-| `GET` | `/admin/leads` | Filterable lead list (stage, area, budget, days) |
-| `GET` | `/admin/analytics` | Full analytics (metrics, skill usage, cost breakdown) |
-| `GET` | `/admin/flags` | Current feature flag values |
-| `POST` | `/admin/flags` | Toggle feature flags at runtime |
-| `POST` | `/admin/broadcast` | WhatsApp blast to users active in last 7 days |
-| `GET` | `/admin/properties` | List all properties from cache |
-| `POST` | `/admin/properties/{prop_id}/documents` | Upload document (PDF/XLSX/CSV/TXT) |
-| `GET` | `/admin/properties/{prop_id}/documents` | List documents for a property |
-| `DELETE` | `/admin/properties/{prop_id}/documents/{doc_id}` | Delete a document |
+| `POST` | `/admin/conversations/{uid}/takeover` | Activate human mode (brand-scoped) |
+| `POST` | `/admin/conversations/{uid}/resume` | Deactivate human mode |
+| `POST` | `/admin/conversations/{uid}/message` | Send admin message via WhatsApp |
+| `GET` | `/admin/command-center` | Today's KPIs (messages, leads, visits, costs) |
+| `GET` | `/admin/leads` | Filterable lead list |
+| `GET` | `/admin/analytics` | Full analytics (funnel, agents, skills, costs, feedback) |
+| `GET` | `/admin/flags` | Effective feature flags (global + brand overrides) |
+| `POST` | `/admin/flags` | Toggle feature flags per-brand |
+| `POST` | `/admin/broadcast` | WhatsApp blast to brand's active users (7 days) |
+| `GET` | `/admin/properties` | List brand's properties |
+| `POST` | `/admin/properties/{prop_id}/documents` | Upload document (ownership check) |
+| `GET` | `/admin/properties/{prop_id}/documents` | List documents |
+| `DELETE` | `/admin/properties/{prop_id}/documents/{doc_id}` | Delete document |
+| `GET` | `/admin/brand-config` | Get brand config (token masked) |
+| `POST` | `/admin/brand-config` | Create/update brand config |
+| `POST` | `/admin/backfill-brands` | One-time migration: tag users with brand_hash |
 
 ---
 
@@ -274,19 +344,19 @@ uvicorn main:app --reload --port 8000
 
 | Agent | Model | Responsibility |
 |-------|-------|---------------|
-| **Supervisor** | Sonnet | Classifies user intent → `{agent, skills[]}` |
+| **Supervisor** | Haiku | Classifies user intent → `{agent, skills[]}` |
 | **Broker** | Haiku | Property search, details, images, comparison, landmarks, shortlisting |
 | **Booking** | Sonnet | Visit scheduling, call scheduling, reservations, payments, KYC |
 | **Profile** | Sonnet | User preferences, scheduled events, shortlisted properties |
 | **Default** | Sonnet | Greetings, brand information, general help |
 
-The Broker agent uses Haiku for cost efficiency (highest volume of requests). All other agents use Sonnet for higher reasoning quality.
+The Broker and Supervisor agents use Haiku for cost efficiency (highest volume of requests). All other agents use Sonnet for higher reasoning quality.
 
 ---
 
 ## Dynamic Skill System
 
-The broker agent uses a hot-reloadable skill file architecture. Skills are `.md` files with YAML frontmatter — editable by non-developers without code changes.
+The broker agent uses a hot-reloadable skill file architecture. Skills are `.md` files with YAML frontmatter — editable without code changes.
 
 | Skill File | Purpose |
 |-----------|---------|
@@ -305,62 +375,22 @@ The broker agent uses a hot-reloadable skill file architecture. Skills are `.md`
 
 **Rollback:** Set `DYNAMIC_SKILLS_ENABLED=false` to instantly revert to the monolithic broker prompt.
 
-**Metrics:** Skill usage tracked in Redis (`skill_usage:{day}` HINCRBY per skill). Exposed in `/admin/analytics`.
-
----
-
-## Generative UI Components
-
-The backend generates structured `parts[]` that the frontend renders via a component registry. Nine part types are supported:
-
-| Part Type | Description |
-|-----------|-------------|
-| `text` | Markdown-formatted text with inline price highlighting |
-| `property_carousel` | Horizontal scrolling property cards with images, scores, amenity pills |
-| `comparison_table` | Side-by-side property comparison with winner badge |
-| `quick_replies` | Contextual suggestion chips (backend-controlled) |
-| `action_buttons` | Primary/secondary CTA buttons |
-| `status_card` | Success/info/warning cards for confirmations (with celebration animations) |
-| `image_gallery` | Grid thumbnails with fullscreen lightbox |
-| `confirmation_card` | Pre-action confirmation with confirm/cancel |
-| `error_card` | Friendly error display with retry button |
+**Metrics:** Skill usage tracked in Redis (`skill_usage:{day}` + `skill_usage:{brand_hash}:{day}`, HINCRBY per skill). Exposed in `/admin/analytics`.
 
 ---
 
 ## Human Mode
 
-Admin operators can take over any conversation from the admin portal. When human mode is active:
+Admin operators can take over any conversation from the admin portal. Human mode is **brand-scoped** — only the brand that activated takeover blocks AI; other brands are unaffected.
 
-- **SSE endpoint (`/chat/stream`)**: Returns an empty `done` event with `agent="human"`. User message is saved to Redis history. No AI response generated.
-- **JSON endpoint (`/chat`)**: Returns `ChatResponse(response="", agent="human")`. Same history-saving behavior.
-- **WhatsApp webhook**: Saves inbound message to history, returns early without calling any send functions (no empty message sent to user).
-- **Admin portal**: Amber banner displayed in thread panel. Input bar appears for admin to type and send messages. "Resume AI" button re-enables AI responses.
+When human mode is active:
+- `pipeline.py` checks `get_human_mode(uid, brand_hash)` before routing → early return
+- AI never responds while human mode is active for that brand
+- Conversation history continues to be saved
+- Admin can send messages via `POST /admin/conversations/{uid}/message`
+- "Resume AI" button clears human mode
 
 Toggle via: `POST /admin/conversations/{uid}/takeover` and `POST /admin/conversations/{uid}/resume`
-
----
-
-## Redis Key Schema
-
-| Key Pattern | Type | Description |
-|------------|------|-------------|
-| `{uid}:conversation` | List | Message history (JSON per entry) |
-| `{uid}:preferences` | Hash | User budget, area, amenity preferences |
-| `{uid}:user_memory` | Hash | Cross-session memory (shortlisted, events, notes) |
-| `{uid}:human_mode` | Hash | `{active, taken_at}` — human takeover state |
-| `{uid}:last_agent` | String | Last agent used (routing stickiness, 1h TTL) |
-| `{uid}:last_search` | JSON | Top-10 results from last search (24h TTL) |
-| `{uid}:session_cost` | Hash | `{tokens_in, tokens_out, cost_usd}` (7-day TTL) |
-| `{uid}:user_language` | String | Detected language (en/hi/mr) |
-| `{uid}:lead_score` | String | Lead qualification score 0-100 |
-| `active_users` | Sorted Set | member=uid, score=unix_ts (for command-center) |
-| `prop_cache:{pg_id}` | JSON | Property data cache (1h TTL) |
-| `web_intel:{category}:{hash}` | JSON | Web search results cache |
-| `metrics:{day}:*` | Hash | Per-agent daily metrics (tool_calls, tokens, errors) |
-| `skill_usage:{day}` | Hash | Per-skill invocation counts (90-day TTL) |
-| `skill_misses:{day}` | Hash | Per-tool skill-miss counts (90-day TTL) |
-| `rate:{uid}:minute` | Sorted Set | Sliding-window rate limit (per-user, per-minute) |
-| `rate:{uid}:hour` | Sorted Set | Sliding-window rate limit (per-user, per-hour) |
 
 ---
 
@@ -368,12 +398,18 @@ Toggle via: `POST /admin/conversations/{uid}/takeover` and `POST /admin/conversa
 
 ### Backend (Render)
 
-The backend auto-deploys to Render on push to `main`:
-
 - **Build command**: `bash build.sh` (installs Python dependencies)
 - **Start command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 - **Services**: Managed Redis + PostgreSQL on Render
 - **Live URL**: `https://claude-booking-bot.onrender.com`
+- **Auto-deploy**: Push to `main` branch
+
+### Frontends (Vercel)
+
+| Project | URL | Purpose |
+|---------|-----|---------|
+| eazypg-chat | `https://eazypg-chat.vercel.app` | Chat widget (Vanilla JS) |
+| eazypg-admin | `https://eazypg-admin.vercel.app` | Admin portal (React 19 + TypeScript) |
 
 ---
 
@@ -385,6 +421,17 @@ The backend auto-deploys to Render on push to `main`:
 | Per-user per-hour | 30 messages |
 | Global per-minute | 100 messages |
 | Web search per-conversation | 3 calls |
+
+---
+
+## Documentation
+
+| Document | Purpose | Read when |
+|----------|---------|-----------|
+| `CLAUDE.md` | Complete file map with line numbers, task recipes | Before reading any source file |
+| `docs/ARCHITECTURE.md` | Redis key schema, Rentok API catalog, agent-tool mapping | Before changing data layer or APIs |
+| `docs/DIRECTORY.md` | High-level operating guide, architecture, risk map | Starting any work |
+| `RENTOK_API.md` | Detailed Rentok API documentation with gotchas | Before any Rentok integration |
 
 ---
 

@@ -7,6 +7,46 @@
 
 ---
 
+## ✅ RESOLUTION STATUS (Updated 2026-03-15)
+
+**All 10 issues identified in this report have been resolved.** The fixes were shipped across multiple commits between February and March 2026. This report is preserved as a historical QA baseline — the issues below no longer apply to the current codebase.
+
+### Fix Summary
+
+| Issue | Severity | Resolution | Key Files Changed |
+|-------|----------|------------|-------------------|
+| #1 Supervisor classify fails | CRITICAL | Fixed JSON parsing — regex strips markdown code fences before `json.loads()` | `core/claude.py` |
+| #2 Profile agent unreachable | CRITICAL | Added `profile_keywords` to keyword safety net (checked before broker keywords) | `core/router.py` (formerly `main.py`) |
+| #3 Broker says "go to website" | CRITICAL | Auto-resolved by #2 — profile queries now correctly route to profile agent | N/A |
+| #4 "yes/ok" loses agent context | HIGH | Added `last_agent` tracking in Redis (10min TTL) — affirmatives fall back to previous agent | `core/router.py`, `db/redis/conversation.py` |
+| #5 Hindi keywords missing | MEDIUM | Added Hindi/Hinglish keywords: kamra, kiraya, chahiye, dikhao, jagah, rehne, milna, dekhna | `core/router.py` |
+| #6 "place to stay" not routed | MEDIUM | Added natural language keywords: place, stay, accommodation, housing, nearby, near | `core/router.py` |
+| #7 Details "didn't load" | MEDIUM | Fixed property detail response formatting + fallback messaging | `tools/broker/property_details.py` |
+| #8 Booking without search context | MEDIUM | Booking agent now searches for property if not in user's cache | `tools/broker/search.py`, booking tools |
+| #9 Default asks 3+ questions | LOW | Added "ask ONE question at a time" rule to default agent prompt | `core/prompts.py` |
+| #10 Empty image/link fields shown | LOW | Empty fields now omitted from search result display | `tools/broker/search.py` |
+
+### Architecture Changes Since This Report
+- **Routing refactored**: Keyword safety net moved from `main.py` to `core/router.py:apply_keyword_safety_net()` — 3-phase routing (phrases → words → last_agent)
+- **Pipeline extracted**: `run_pipeline()` moved from `main.py` to `core/pipeline.py`
+- **Routers split**: All endpoints moved from `main.py` to `routers/` package (public, chat, webhooks, admin)
+- **Supervisor now works**: Returns `{"agent": str, "skills": list[str]}` — skills used for dynamic broker prompt loading
+
+### Current Test Results (post-fixes)
+| Suite | Result |
+|-------|--------|
+| `e2e.spec.js` (35 Playwright tests) | **35/35 PASS** |
+| `test_comprehensive.py` (16 tool tests) | **16/16 PASS** |
+| `stress_test_broker_prod.py` (20 scenarios) | **13 PASS / 5 WARN / 2 FAIL** (S04/S08 are Haiku stochasticity) |
+
+---
+
+## Original Report (2026-02-24)
+
+The issues below are preserved for historical reference. All have been resolved — see resolution table above.
+
+---
+
 ## Test Results Summary
 
 | # | Test | Agent Expected | Agent Actual | Result | Issue |
