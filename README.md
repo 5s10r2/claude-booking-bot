@@ -25,8 +25,12 @@ A full-stack conversational AI assistant that helps users find, compare, and boo
 - **Multi-Agent AI** — Supervisor routes to 4 specialized agents: Broker, Booking, Profile, Default
 - **Dynamic Skill System** — Broker agent loads only the skills/tools needed per turn (12 `.md` skill files, hot-reloadable, 30s cache)
 - **Multi-Brand Isolation** — Per-brand data, analytics (dual-write), feature flags, human mode, and admin scoping
-- **Property Search & Comparison** — Geocoded search, match scoring, side-by-side comparison tables
+- **Property Search & Comparison** — Geocoded search, outcome-aware match scoring, side-by-side comparison tables
 - **Visit Scheduling & Payments** — Schedule visits, reserve beds, create payment links (payment optional via `PAYMENT_REQUIRED` flag)
+- **Post-Visit Follow-Ups** — 3-step automated follow-up state machine (2h/24h/48h) with reply classification
+- **Observability Suite** — Tool reliability, response latency, routing accuracy, conversation quality (0-100), attention flags, structured error log
+- **Outcome-Aware Recommendations** — Property conversion/no-show history adjusts match scores (+3/conversion, -5 for 2+ no-shows)
+- **Lead Outcomes** — Admin marks converted/lost/no_show with side effects (funnel tracking, deal-breakers, property signals)
 - **Generative UI** — Backend-controlled rich components (carousels, status cards, galleries, confirmation cards, expandable sections)
 - **Dual Channel** — Web chat (SSE streaming with AbortController interrupt) + WhatsApp (Meta/Interakt APIs with multi-turn queue)
 - **WhatsApp Multi-Turn** — Phase B+C: wamid dedup, Redis queue, 2s debounce, pipeline cancellation on new messages
@@ -171,6 +175,8 @@ claude-booking-bot/
 │   ├── pipeline.py          # Shared pipeline: run_pipeline() for chat + WhatsApp
 │   ├── auth.py              # Auth helpers: require_admin_brand_key, require_brand_api_key
 │   ├── state.py             # Shared singletons (engine, conversation)
+│   ├── followup.py          # Multi-step post-visit follow-up state machine (3-step, 2h/24h/48h)
+│   ├── attention.py         # Needs-attention flag computation (5 conditions, 1h TTL)
 │   ├── ui_parts.py          # Generative UI part generation
 │   ├── message_parser.py    # Response → structured parts
 │   ├── conversation.py      # History management + compaction (brand-aware)
@@ -196,15 +202,16 @@ claude-booking-bot/
 │   │   ├── user.py          # Memory, preferences, shortlist, followups, lead score
 │   │   ├── property.py      # Property cache, images, templates
 │   │   ├── payment.py       # Payment link + active request dedup
-│   │   ├── analytics.py     # Funnel, feedback, usage, costs (dual-write: global + brand)
+│   │   ├── analytics.py     # Funnel, feedback, usage, costs, property signals (dual-write)
+│   │   ├── quality.py       # Conversation quality scoring (0-100, 7 signals)
 │   │   ├── brand.py         # Brand config, WA reverse-lookup, per-brand flags
 │   │   └── admin.py         # Active users, human mode (brand-scoped), session cost
 │   ├── redis_store.py       # Backward-compat shim (re-exports from db/redis/)
-│   └── postgres.py          # Message logging + leads + property docs (brand_hash column)
+│   └── postgres.py          # Message logging + leads + property docs + error events (brand_hash column)
 ├── channels/
 │   └── whatsapp.py          # WhatsApp send (Meta/Interakt dual support)
 ├── utils/                   # Helpers
-│   ├── scoring.py           # Property match scoring (weighted, fuzzy amenity)
+│   ├── scoring.py           # Property match scoring (weighted, fuzzy amenity, outcome-aware)
 │   ├── geo.py               # Shared geocoding helper
 │   ├── date.py              # Date/time parsing
 │   ├── image.py             # Image processing (WEBP→JPEG for WhatsApp)
@@ -325,8 +332,10 @@ uvicorn main:app --reload --port 8000
 | `POST` | `/admin/conversations/{uid}/resume` | Deactivate human mode |
 | `POST` | `/admin/conversations/{uid}/message` | Send admin message via WhatsApp |
 | `GET` | `/admin/command-center` | Today's KPIs (messages, leads, visits, costs) |
-| `GET` | `/admin/leads` | Filterable lead list |
-| `GET` | `/admin/analytics` | Full analytics (funnel, agents, skills, costs, feedback) |
+| `GET` | `/admin/leads` | Filterable lead list (+ outcome filter) |
+| `POST` | `/admin/leads/{uid}/outcome` | Mark lead outcome (converted/lost/no_show/in_progress) |
+| `GET` | `/admin/analytics` | Full analytics (funnel, agents, skills, costs, feedback, property_performance, quality_distribution, error_summary) |
+| `GET` | `/admin/errors` | Paginated structured error events (type/days filters) |
 | `GET` | `/admin/flags` | Effective feature flags (global + brand overrides) |
 | `POST` | `/admin/flags` | Toggle feature flags per-brand |
 | `POST` | `/admin/broadcast` | WhatsApp blast to brand's active users (7 days) |

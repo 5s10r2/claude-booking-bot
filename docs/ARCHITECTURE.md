@@ -162,6 +162,23 @@ All analytics functions write to BOTH global keys (above) and brand-scoped keys 
 | `{uid}:wa_processing` | string "1" (NX lock) | 2 min | Per-user drain task lock |
 | `{uid}:cancel_requested` | string "1" | 30s | Pipeline cancellation signal (Phase C) |
 
+### Observability (Sprints 1-5)
+| Key | Type | TTL | Purpose |
+|-----|------|-----|---------|
+| `tool_reliability:{day}` | hash | 90d | Per-tool success/failure/latency_sum/latency_count |
+| `routing_accuracy:{day}` | hash | 90d | Supervisor override counts |
+| `response_latency:{day}` | hash | 90d | Per-agent latency_sum/latency_count |
+| `property_events:{day}` | hash | 90d | Property lifecycle events ({property_id}:{event} count) |
+| `property_events:{brand_hash}:{day}` | hash | 90d | Brand-scoped property events |
+| `property_signals:{property_id}` | hash | none | Outcome counts {converted, lost, no_show} for scoring adjustments |
+| `{uid}:attention_flags` | JSON list | 1h | Cached attention flags (no_response, negative_feedback, hot_lead_stalled, human_active, tool_errors) |
+| `{uid}:conversation_quality` | JSON | 90d | Quality score {score: 0-100, signals: {...}, computed_at} |
+
+### Follow-Up State Machine (Sprint 2)
+| Key | Type | TTL | Purpose |
+|-----|------|-----|---------|
+| `{uid}:followup_state` | JSON list | 7d | Multi-step follow-up [{property_id, property_name, step, status, visit_time, ...}] |
+
 ### Web Search Cache
 | Key | Type | TTL | Purpose |
 |-----|------|-----|---------|
@@ -260,14 +277,16 @@ Fallback: `DYNAMIC_SKILLS_ENABLED=false` → monolithic broker prompt (all skill
 
 1. **Load**: `get_conversation(user_id)` from Redis (JSON list of messages)
 2. **Append**: User message added to history
-3. **Human Mode Check**: `get_human_mode(uid, brand_hash)` — if active, skip AI pipeline
-4. **Route**: Supervisor classifies intent → agent name + skills (keyword safety net → LLM → last_agent fallback)
-5. **Execute**: Agent runs with conversation history + tools (max 15 iterations)
+3. **Follow-up Check**: `has_active_followup(uid)` — if true, `handle_followup_reply()` routes to follow-up state machine before normal routing
+4. **Human Mode Check**: `get_human_mode(uid, brand_hash)` — if active, skip AI pipeline
+5. **Route**: Supervisor classifies intent → agent name + skills (keyword safety net → LLM → last_agent fallback)
+6. **Execute**: Agent runs with conversation history + tools (max 15 iterations)
    - Phase C: `is_cancel_requested(uid)` checked between tool iterations — returns early if set
-6. **Summarize**: If message count > 30, `maybe_summarize()` compresses older messages into a summary, keeping 10 most recent verbatim. Brand context injected when `brand_hash` available.
-7. **Save**: `save_conversation(user_id, messages, brand_hash)` to Redis (TTL: 24h). Tags user with brand, adds to brand active users.
-8. **Analytics**: Track agent usage, skill usage, funnel events, API costs — all dual-written (global + brand-scoped)
-9. **Respond**: WhatsApp: parse markdown → send parts. Web: stream SSE events with Generative UI parts.
+7. **Summarize**: If message count > 30, `maybe_summarize()` compresses older messages into a summary, keeping 10 most recent verbatim. Brand context injected when `brand_hash` available.
+8. **Save**: `save_conversation(user_id, messages, brand_hash)` to Redis (TTL: 24h). Tags user with brand, adds to brand active users.
+9. **Post-Save (fire-and-forget)**: Compute attention flags (`update_attention_flags`) + quality score (`update_conversation_quality`)
+10. **Analytics**: Track agent usage, skill usage, funnel events, API costs — all dual-written (global + brand-scoped)
+11. **Respond**: WhatsApp: parse markdown → send parts. Web: stream SSE events with Generative UI parts.
 
 ### Conversation Format
 ```python
@@ -447,4 +466,6 @@ The safety net runs first; supervisor LLM runs only if no keyword match.
 | DELETE | `/admin/properties/{prop_id}/documents/{doc_id}` | admin.py | Delete document (ownership check) |
 | GET | `/admin/brand-config` | admin.py | Get brand config (token masked) |
 | POST | `/admin/brand-config` | admin.py | Create/update brand config |
+| POST | `/admin/leads/{uid}/outcome` | admin.py | Mark lead outcome (converted/lost/no_show/in_progress) with side effects |
+| GET | `/admin/errors` | admin.py | Paginated structured error events (type/days filters + summary) |
 | POST | `/admin/backfill-brands` | admin.py | One-time migration: tag existing users with brand_hash |
