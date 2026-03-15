@@ -327,7 +327,18 @@ async def payment_webhook(request: Request):
 
 @router.post("/cron/follow-ups", dependencies=[Depends(verify_api_key)])
 async def process_followups():
-    """Process due follow-ups. Call this endpoint via an external cron (every 15 min)."""
+    """Process due follow-ups. Call this endpoint via an external cron (every 15 min).
+
+    Two systems run in parallel:
+    1. Sorted-set followups (payment.py) — fires Step 1 (visit_complete) at visit_time + 2h
+    2. State-machine followups (core/followup.py) — fires Steps 2 & 3 based on elapsed time
+    """
+    from core.followup import (
+        get_followup_state, advance_followup, get_due_state_followups,
+        _save_followup_state,
+    )
+    from db.redis_store import get_user_brand as _get_ub, get_user_phone as _get_phone
+
     followups = get_due_followups(limit=50)
     processed = 0
     errors = 0
@@ -346,14 +357,28 @@ async def process_followups():
 
         try:
             if ftype == "visit_complete":
-                message = (
-                    f"Hey! How was your visit to {prop_name}? 🏠\n\n"
-                    "Quick feedback:\n"
-                    "1️⃣ Loved it — I want to book!\n"
-                    "2️⃣ It was okay\n"
-                    "3️⃣ Not for me\n\n"
-                    "Just reply with 1, 2, or 3 and I'll take it from there!"
-                )
+                # Step 1: Use state machine to generate message + advance state
+                states = get_followup_state(user_id)
+                prop_id = data.get("property_id", "")
+                # Find matching state entry
+                target = None
+                for s in states:
+                    if s.get("property_id") == prop_id and s.get("step", 0) == 0:
+                        target = s
+                        break
+                if target:
+                    message = advance_followup(user_id, target)
+                    _save_followup_state(user_id, states)
+                else:
+                    # Fallback: no state entry (legacy followup without state machine)
+                    message = (
+                        f"Hey! How was your visit to {prop_name}? 🏠\n\n"
+                        "Quick feedback:\n"
+                        "1️⃣ Loved it — I want to book!\n"
+                        "2️⃣ It was okay\n"
+                        "3️⃣ Not for me\n\n"
+                        "Just reply with 1, 2, or 3 and I'll take it from there!"
+                    )
             elif ftype == "payment_pending":
                 link = data.get("link", "")
                 amount = data.get("amount", "")
@@ -385,21 +410,8 @@ async def process_followups():
                 complete_followup(raw)
                 continue
 
-            # Send via appropriate channel
-            # Check if user is a WhatsApp user (phone-based ID)
-            if user_id.isdigit() and 10 <= len(user_id) <= 13:
-                account = get_account_values(user_id)
-                if account.get("whatsapp_phone_number_id"):
-                    await send_text(user_id, message)
-                    processed += 1
-                else:
-                    logger.info("follow-up skipped (no WA config): user=%s type=%s", user_id, ftype)
-            else:
-                # Web chat user — store message for next session retrieval
-                from db.redis_store import get_user_brand as _get_ub_fu
-                conv = get_conversation(user_id)
-                conv.append({"role": "assistant", "content": f"[FOLLOW_UP] {message}"})
-                save_conversation(user_id, conv, brand_hash=_get_ub_fu(user_id))
+            ok = await _deliver_followup(user_id, message)
+            if ok:
                 processed += 1
 
             complete_followup(raw)
@@ -407,11 +419,73 @@ async def process_followups():
         except Exception as e:
             logger.error("follow-up processing failed: user=%s type=%s error=%s", user_id, ftype, e)
             errors += 1
-            # Don't remove — will be retried on next cron run
+
+    # ── State-machine followups: Steps 2 & 3 (no-reply escalation) ──
+    state_due = get_due_state_followups(limit=50)
+    for uid, followup in state_due:
+        try:
+            # get_due_state_followups returns references into the full state list,
+            # so advance_followup mutates the dict in place. We just re-read + save.
+            old_step = followup.get("step", 0)
+            message = advance_followup(uid, followup)
+            if not message:
+                continue
+            # Re-read the full state list and update the matching entry
+            states = get_followup_state(uid)
+            prop_id = followup.get("property_id")
+            for i, s in enumerate(states):
+                if s.get("property_id") == prop_id and s.get("step", 0) == old_step:
+                    states[i] = followup
+                    break
+            _save_followup_state(uid, states)
+
+            ok = await _deliver_followup(uid, message)
+            if ok:
+                processed += 1
+        except Exception as e:
+            logger.error("state followup failed: user=%s prop=%s error=%s", uid, followup.get("property_name"), e)
+            errors += 1
 
     return {
         "status": "ok",
         "processed": processed,
         "errors": errors,
-        "pending": len(followups) - processed - errors,
     }
+
+
+async def _deliver_followup(user_id: str, message: str) -> bool:
+    """Deliver a follow-up message via the best available channel.
+
+    Channel priority:
+    1. WhatsApp user (phone-based ID) → WhatsApp
+    2. Web user with phone number → WhatsApp
+    3. Web user without phone → save as proper assistant message in conversation
+    """
+    from db.redis_store import get_user_brand as _get_ub, get_user_phone as _get_phone
+
+    # WhatsApp user (phone-based ID)
+    if user_id.isdigit() and 10 <= len(user_id) <= 13:
+        account = get_account_values(user_id)
+        if account.get("whatsapp_phone_number_id"):
+            await send_text(user_id, message)
+            return True
+        logger.info("follow-up skipped (no WA config): user=%s", user_id)
+        return False
+
+    # Web user — check if they have a phone number (can reach via WhatsApp)
+    phone = _get_phone(user_id)
+    if phone and phone.isdigit() and 10 <= len(phone) <= 13:
+        # Try to send via WhatsApp using the phone number
+        try:
+            await send_text(phone, message)
+            return True
+        except Exception as e:
+            logger.warning("WA delivery to web user failed (phone=%s): %s", phone, e)
+            # Fall through to in-chat delivery
+
+    # Web user without phone or WA delivery failed — save as proper assistant message
+    brand_hash = _get_ub(user_id)
+    conv = get_conversation(user_id)
+    conv.append({"role": "assistant", "content": message})
+    save_conversation(user_id, conv, brand_hash=brand_hash)
+    return True

@@ -38,6 +38,23 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     # Resolve brand_hash once for all downstream calls
     brand_hash = get_user_brand(user_id)
 
+    # Follow-up reply interception — if user has an active followup awaiting reply,
+    # handle it directly without routing through supervisor/agent
+    try:
+        from core.followup import has_active_followup, handle_followup_reply
+        if has_active_followup(user_id):
+            followup_response = handle_followup_reply(user_id, message)
+            if followup_response:
+                # Save to conversation history so it shows in admin + chat
+                lang = get_user_language(user_id) or "en"
+                conv = get_conversation(user_id)
+                conv.append({"role": "user", "content": message})
+                conv.append({"role": "assistant", "content": followup_response})
+                save_conversation(user_id, conv, brand_hash=brand_hash)
+                return followup_response, "followup", lang
+    except Exception as e:
+        logger.warning("followup reply check failed: %s", e)
+
     # Human takeover bypass — admin is handling this user manually
     if get_human_mode(user_id, brand_hash=brand_hash):
         conv = get_conversation(user_id)

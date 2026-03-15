@@ -3,6 +3,7 @@ import httpx
 from config import settings
 from core.log import get_logger
 from db.redis_store import get_property_info_map, get_account_values, track_funnel, get_user_phone, get_aadhar_user_name, get_user_memory, record_visit_scheduled, schedule_followup, get_user_brand
+from core.followup import create_followup_state
 from utils.date import transcribe_date
 from utils.properties import find_property as _find_property
 from utils.retry import http_post
@@ -101,6 +102,13 @@ async def save_visit_time(
             "visit_date": visit_date,
             "visit_time": visit_time,
         }, followup_delay)
+        # Create multi-step follow-up state for the state machine (Sprint 2)
+        create_followup_state(
+            user_id, property_id,
+            prop.get("property_name", property_name),
+            visit_dt.isoformat(),
+            brand_hash=get_user_brand(user_id),
+        )
     except Exception as e:
         logger.warning("follow-up scheduling failed: %s", e)
 

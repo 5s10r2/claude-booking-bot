@@ -54,6 +54,7 @@ core/rate_limiter.py (192)  — Sliding-window limits | check_rate_limit@112
 core/message_parser.py (355) — Claude markdown → WhatsApp parts | parse_message_parts@21
 core/tool_executor.py (97)  — Tool dispatch + error recovery + graceful fallback expansion | ToolExecutor@55, set_fallback@66 (fallback handlers for skill misses), _build_fallback@19 (cached property data on error)
 core/router.py       (135)  — Keyword safety net (3-phase) | apply_keyword_safety_net@15 (phrases→words→last_agent)
+core/followup.py     (335)  — Multi-step post-visit follow-up state machine | create_followup_state@47, get_followup_state@87, classify_reply@106, has_active_followup@135, handle_followup_reply@141, advance_followup@225, get_due_state_followups@283
 core/log.py          (42)   — Logging setup | get_logger@39
 core/ui_parts.py     (865)  — Backend-controlled Generative UI parts | generate_ui_parts@618 (quick_replies, action_buttons, expandable_sections from tool results + context), _generate_expandable_sections@515
 ```
@@ -310,6 +311,13 @@ wamid:{wamid}             String "1", 24h TTL — WhatsApp message dedup by Meta
 {uid}:wa_processing       String "1" (SET NX lock), 2 min TTL — per-user drain task lock
 {uid}:cancel_requested    String "1", 30s TTL — Phase C pipeline cancellation signal
 ```
+
+### New Redis Keys (Follow-Up State Machine — Sprint 2)
+```
+{uid}:followup_state      JSON list, 7d TTL — per-user multi-step follow-up state [{property_id, property_name, step, status, visit_time, step_N_sent_at, ...}]
+```
+Follow-up state machine: 3-step (2h/24h/48h) post-visit follow-up. Step 1 fires via sorted-set system (payment.py), Steps 2-3 fire via `get_due_state_followups()` scan. Pipeline intercepts replies via `has_active_followup()` before routing.
+
 Phase B: webhook returns 200 immediately; `_drain_and_process()` in webhooks.py debounces 2s then drains all queued messages into one pipeline run.
 Phase C: `core/claude.py` checks `cancel_requested` between tool-call iterations; drain task sets it before re-looping on new arrivals.
 Config: `WA_DEBOUNCE_SECONDS=2.0`, `WAMID_DEDUP_TTL=86400`, `WA_QUEUE_TTL=300`, `WA_PROCESSING_TTL=120` (all in `config.py`).

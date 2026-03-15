@@ -333,6 +333,13 @@ async def admin_conversation_detail(uid: str, brand_hash: str = Depends(require_
     human_mode = get_human_mode(uid, brand_hash=brand_hash)
     last_agent = get_last_agent(uid) or "default"
 
+    # Follow-up state (Sprint 2)
+    try:
+        from core.followup import get_followup_state
+        followup_state = get_followup_state(uid)
+    except Exception:
+        followup_state = []
+
     return {
         "uid": uid,
         "messages": conv,
@@ -341,6 +348,7 @@ async def admin_conversation_detail(uid: str, brand_hash: str = Depends(require_
         "cost": cost,
         "human_mode": human_mode,
         "last_agent": last_agent,
+        "followup_state": followup_state,
     }
 
 
