@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "booking-bot",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "uvicorn", "main:app", "--port", "8000", "--log-level", "info"],
+      "port": 8000
+    }
+  ]
+}
