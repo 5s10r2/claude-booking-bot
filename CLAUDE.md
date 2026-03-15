@@ -128,7 +128,7 @@ channels/whatsapp.py (254)  — WhatsApp send (Meta/Interakt) | send_text@60, se
 utils/date.py       (143) — Date parsing | transcribe_date@24
 utils/geo.py        (44)  — Shared geocoding helper | geocode_address@15 (handles nested + top-level API response formats). Used by search.py, landmarks.py
 utils/image.py      (102) — Image conversion + WA upload | upload_media_from_url@43
-utils/scoring.py    (240) — Property match scoring (weighted, fuzzy amenity, deal_breaker penalty) | match_score@8, _fuzzy_amenity_match@150
+utils/scoring.py    (245) — Property match scoring (weighted, fuzzy amenity, deal_breaker penalty, outcome signals) | match_score@8, _fuzzy_amenity_match@150. Sprint 5: property_signals param for outcome-aware scoring (+3/conversion, -5 if 2+ no_shows)
 utils/retry.py      (148) — Async retry decorator (2 retries, exponential backoff) | with_retry@15
 utils/properties.py (20)  — Shared property lookup (exact + substring match) | find_property@4
 utils/api.py        (25)  — Rentok API response validation | check_rentok_response@14, RentokAPIError@8
@@ -320,6 +320,7 @@ property_events:{day}                  Hash, 90d TTL — global property events 
 property_events:{brand_hash}:{day}     Hash, 90d TTL — brand-scoped property events
 {uid}:attention_flags                  JSON list, 1h TTL — cached attention flags (e.g. ["no_response", "hot_lead_stalled"])
 {uid}:conversation_quality             JSON, 90d TTL — {score, signals, computed_at} — conversation quality score (0-100)
+property_signals:{property_id}         Hash, no TTL — outcome counts {converted, lost, no_show} for scoring adjustments
 ```
 
 ### New Redis Keys (Follow-Up State Machine — Sprint 2)

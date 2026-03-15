@@ -331,6 +331,12 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         "property_type": property_type or "",
         "pg_available_for": pg_available_for or "",
     }
+    # Load property outcome signals for scoring (Sprint 5)
+    try:
+        from db.redis.analytics import get_property_signals
+    except ImportError:
+        get_property_signals = None
+
     for p in properties:
         prop_data = {
             "rent": p.get("p_rent_starts_from", p.get("rent", 0)),
@@ -339,7 +345,16 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
             "property_type": p.get("p_property_type", ""),
             "pg_available_for": p.get("p_pg_available_for", ""),
         }
-        p["_custom_score"] = calc_match_score(prop_data, scoring_prefs, deal_breakers=deal_breakers)
+        # Fetch outcome signals for this property (fire-and-forget on failure)
+        signals = {}
+        if get_property_signals:
+            try:
+                pid = p.get("p_property_id", p.get("property_id", ""))
+                if pid:
+                    signals = get_property_signals(pid)
+            except Exception:
+                pass
+        p["_custom_score"] = calc_match_score(prop_data, scoring_prefs, deal_breakers=deal_breakers, property_signals=signals)
 
     # Sort by custom score (descending) to surface best matches first
     properties.sort(key=lambda p: p.get("_custom_score", 0), reverse=True)

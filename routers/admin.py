@@ -713,6 +713,8 @@ async def admin_set_lead_outcome(uid: str, body: LeadOutcomeRequest, brand_hash:
             visited = mem.get("visits_attended", []) or mem.get("properties_visited", [])
             if visited:
                 track_property_event(visited[-1], "booking_initiated", brand_hash=brand_hash)
+                from db.redis.analytics import track_property_outcome
+                track_property_outcome(visited[-1], "converted")
         except Exception:
             pass
 
@@ -720,6 +722,22 @@ async def admin_set_lead_outcome(uid: str, body: LeadOutcomeRequest, brand_hash:
         try:
             from db.redis_store import add_deal_breaker
             add_deal_breaker(uid, f"No-show (admin marked): {body.notes}" if body.notes else "No-show (admin marked)")
+            # Track no_show on the property
+            mem = get_user_memory(uid)
+            visited = mem.get("visits_attended", []) or mem.get("properties_visited", [])
+            if visited:
+                from db.redis.analytics import track_property_outcome
+                track_property_outcome(visited[-1], "no_show")
+        except Exception:
+            pass
+
+    elif body.outcome == "lost":
+        try:
+            mem = get_user_memory(uid)
+            visited = mem.get("visits_attended", []) or mem.get("properties_visited", [])
+            if visited:
+                from db.redis.analytics import track_property_outcome
+                track_property_outcome(visited[-1], "lost")
         except Exception:
             pass
 

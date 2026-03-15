@@ -140,6 +140,9 @@ from db.redis.analytics import (  # noqa: F401
     get_property_events,
     get_property_performance,
     PROPERTY_EVENTS,
+    # Property outcome signals (Sprint 5)
+    track_property_outcome,
+    get_property_signals,
     set_response,
     get_response,
     FUNNEL_STAGES,

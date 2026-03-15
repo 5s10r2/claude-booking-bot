@@ -75,6 +75,7 @@ def match_score(
     amenity_weights: Optional[dict] = None,
     deal_breakers: Optional[list] = None,
     near_transit: bool = False,
+    property_signals: Optional[dict] = None,
 ) -> float:
     """Calculate a 0-100 match score between a property and user preferences.
 
@@ -193,6 +194,18 @@ def match_score(
             # "far from metro" style: check if keyword is present in property text
             elif db_lower in prop_text:
                 score -= 15
+
+    # Outcome-based signal adjustment (Sprint 5 — outcome-aware recommendations)
+    # property_signals: {converted: N, lost: N, no_show: N} from admin lead outcomes
+    if property_signals:
+        converted = property_signals.get("converted", 0)
+        no_show = property_signals.get("no_show", 0)
+        # Social proof: conversions boost confidence (+3 per conversion, max +9)
+        if converted > 0:
+            score += min(converted * 3, 9)
+        # Risk signal: repeated no-shows suggest property issues (-5 if 2+)
+        if no_show >= 2:
+            score -= 5
 
     return round(min(100, max(0, score)), 1)
 

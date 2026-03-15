@@ -497,3 +497,27 @@ def set_response(wama_id: str, message: str) -> None:
 def get_response(wama_id: str) -> Optional[str]:
     raw = _r().get(f"wama:{wama_id}")
     return raw.decode() if raw else None
+
+
+# ---------------------------------------------------------------------------
+# Property outcome signals (Sprint 5 — outcome-aware recommendations)
+# ---------------------------------------------------------------------------
+
+def track_property_outcome(property_id: str, outcome: str) -> None:
+    """Increment outcome count for a property. No TTL — permanent signal.
+
+    outcome: converted | lost | no_show
+    """
+    if not property_id or outcome not in ("converted", "lost", "no_show"):
+        return
+    _r().hincrby(f"property_signals:{property_id}", outcome, 1)
+
+
+def get_property_signals(property_id: str) -> dict[str, int]:
+    """Return outcome signals for a property: {converted: N, lost: N, no_show: N}."""
+    if not property_id:
+        return {}
+    raw = _r().hgetall(f"property_signals:{property_id}")
+    if not raw:
+        return {}
+    return {k.decode(): int(v) for k, v in raw.items()}
