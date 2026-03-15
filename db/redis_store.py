@@ -126,6 +126,11 @@ from db.redis import (  # noqa: F401
     # Response latency (C3)
     track_response_latency,
     get_response_latency,
+    # Property-level events (Sprint 3)
+    track_property_event,
+    get_property_events,
+    get_property_performance,
+    PROPERTY_EVENTS,
     # Payment domain
     set_payment_info,
     get_payment_info,

@@ -55,6 +55,7 @@ core/message_parser.py (355) — Claude markdown → WhatsApp parts | parse_mess
 core/tool_executor.py (97)  — Tool dispatch + error recovery + graceful fallback expansion | ToolExecutor@55, set_fallback@66 (fallback handlers for skill misses), _build_fallback@19 (cached property data on error)
 core/router.py       (135)  — Keyword safety net (3-phase) | apply_keyword_safety_net@15 (phrases→words→last_agent)
 core/followup.py     (335)  — Multi-step post-visit follow-up state machine | create_followup_state@47, get_followup_state@87, classify_reply@106, has_active_followup@135, handle_followup_reply@141, advance_followup@225, get_due_state_followups@283
+core/attention.py    (110)  — Needs-attention flag computation | compute_attention_flags@35, save_attention_flags@94, get_attention_flags@99, update_attention_flags@108. Triggered from pipeline.py after assistant response save.
 core/log.py          (42)   — Logging setup | get_logger@39
 core/ui_parts.py     (865)  — Backend-controlled Generative UI parts | generate_ui_parts@618 (quick_replies, action_buttons, expandable_sections from tool results + context), _generate_expandable_sections@515
 ```
@@ -112,7 +113,7 @@ db/redis/conversation.py (205+) — Conversation history, compaction, last-agent
 db/redis/user.py     (451)  — User memory, preferences, shortlist, followups, lead score, name, phone | get_user_memory@12, update_user_memory@40, get_lead_score@200, schedule_followup@280
 db/redis/property.py (111)  — Property cache, images, templates, last-search cache | property_info_map ops, get_property_template@60
 db/redis/payment.py  (114)  — Payment link + active request dedup | get_active_request@5, set_active_request@15, get_payment_link@50
-db/redis/analytics.py (212+) — Funnel events, feedback, agent/skill usage, costs | ALL functions dual-write: global + brand-scoped (brand_hash param). track_funnel@5, get_funnel@40, save_feedback@80, get_feedback_counts@95, track_agent_usage@110, track_skill_usage@130, track_skill_miss@145, increment_agent_cost@155, get_agent_costs@175, increment_daily_cost@185, get_daily_cost@195
+db/redis/analytics.py (500+) — Funnel events, feedback, agent/skill usage, costs, property events | ALL functions dual-write: global + brand-scoped (brand_hash param). track_funnel@5, get_funnel@40, save_feedback@80, get_feedback_counts@95, track_agent_usage@110, track_skill_usage@130, track_skill_miss@145, increment_agent_cost@155, get_agent_costs@175, increment_daily_cost@185, get_daily_cost@195, track_property_event@430, get_property_events@450, get_property_performance@465
 db/redis/brand.py    (80+)  — Brand config + WA reverse-lookup + brand token + per-brand flags | get_brand_config@5, set_brand_config@20, get_brand_config_by_hash@45, get_brand_flags@55, set_brand_flag@60, get_effective_flags@68 (merges brand overrides over global defaults)
 db/redis/admin.py    (120+) — Active users (global + per-brand), human mode (per-brand scoped), session cost | set_user_brand@38, get_user_brand@43, add_to_brand_active_users@49, get_brand_active_users@54, get_brand_active_users_count@60, get_human_mode@69 (brand-scoped + global fallback), set_human_mode@85, clear_human_mode@91
 db/redis/__init__.py (180+) — Re-exports ALL public symbols from all 8 domain modules (backward-compat)
@@ -312,6 +313,13 @@ wamid:{wamid}             String "1", 24h TTL — WhatsApp message dedup by Meta
 {uid}:cancel_requested    String "1", 30s TTL — Phase C pipeline cancellation signal
 ```
 
+### New Redis Keys (Sprint 3 — Property Analytics + Attention)
+```
+property_events:{day}                  Hash, 90d TTL — global property events ({property_id}:{event} → count)
+property_events:{brand_hash}:{day}     Hash, 90d TTL — brand-scoped property events
+{uid}:attention_flags                  JSON list, 1h TTL — cached attention flags (e.g. ["no_response", "hot_lead_stalled"])
+```
+
 ### New Redis Keys (Follow-Up State Machine — Sprint 2)
 ```
 {uid}:followup_state      JSON list, 7d TTL — per-user multi-step follow-up state [{property_id, property_name, step, status, visit_time, step_N_sent_at, ...}]
@@ -351,6 +359,7 @@ DELETE /admin/properties/{prop_id}/documents/{doc_id} — delete document (owner
 GET  /admin/brand-config                              — get brand config for API key (token masked "••••xxxx")
 POST /admin/brand-config                              — create/update brand config; auto-generates brand_link_token
 POST /admin/backfill-brands                           — one-time migration: tag existing users with OxOtel brand_hash
+POST /admin/leads/{uid}/outcome                        — mark lead outcome (converted/lost/no_show/in_progress); fires side effects
 GET  /brand-config?token={uuid}                       — PUBLIC, no auth — returns safe fields only (pg_ids, brand_name, cities, areas, brand_hash)
 ```
 

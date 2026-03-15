@@ -2,7 +2,7 @@ import httpx
 
 from config import settings
 from core.log import get_logger
-from db.redis_store import get_property_info_map, get_account_values, track_funnel, get_user_phone, get_aadhar_user_name, get_user_memory, record_visit_scheduled, schedule_followup, get_user_brand
+from db.redis_store import get_property_info_map, get_account_values, track_funnel, get_user_phone, get_aadhar_user_name, get_user_memory, record_visit_scheduled, schedule_followup, get_user_brand, track_property_event
 from core.followup import create_followup_state
 from utils.date import transcribe_date
 from utils.properties import find_property as _find_property
@@ -87,8 +87,13 @@ async def save_visit_time(
     maps_link = f"https://www.google.com/maps?q={prop_lat},{prop_long}" if prop_lat and prop_long else ""
     location_info = f"\nLocation: {maps_link}" if maps_link else ""
 
-    track_funnel(user_id, "visit", brand_hash=get_user_brand(user_id))
+    brand_hash_val = get_user_brand(user_id)
+    track_funnel(user_id, "visit", brand_hash=brand_hash_val)
     record_visit_scheduled(user_id, property_id)
+    try:
+        track_property_event(property_id, "visit_scheduled", brand_hash=brand_hash_val)
+    except Exception:
+        pass
 
     # Schedule follow-up: 2 hours after the visit time
     try:

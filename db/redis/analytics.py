@@ -423,6 +423,70 @@ def get_response_latency(day: str = None, brand_hash: str = None) -> dict[str, d
 
 
 # ---------------------------------------------------------------------------
+# Property-level event tracking (Sprint 3 — per-property funnel)
+# ---------------------------------------------------------------------------
+
+PROPERTY_EVENTS = ("viewed", "shortlisted", "visit_scheduled", "visit_attended", "booking_initiated")
+
+
+def track_property_event(property_id: str, event: str, brand_hash: str = None) -> None:
+    """Track a per-property event. Dual-write global + brand-scoped.
+
+    Redis hash key: property_events:{day} (+ property_events:{brand_hash}:{day})
+    Field: {property_id}:{event}
+    """
+    if not property_id or event not in PROPERTY_EVENTS:
+        return
+    day = date.today().isoformat()
+    field = f"{property_id}:{event}"
+    key = f"property_events:{day}"
+    pipe = _r().pipeline(transaction=False)
+    pipe.hincrby(key, field, 1)
+    pipe.expire(key, ANALYTICS_TTL)
+    if brand_hash:
+        bkey = f"property_events:{brand_hash}:{day}"
+        pipe.hincrby(bkey, field, 1)
+        pipe.expire(bkey, ANALYTICS_TTL)
+    pipe.execute()
+
+
+def get_property_events(day: str = None, brand_hash: str = None) -> dict[str, int]:
+    """Return raw {property_id:event: count} hash for a day.
+
+    Brand-scoped if brand_hash provided.
+    """
+    if day is None:
+        day = date.today().isoformat()
+    key = f"property_events:{brand_hash}:{day}" if brand_hash else f"property_events:{day}"
+    raw = _r().hgetall(key)
+    return {k.decode(): int(v) for k, v in raw.items()} if raw else {}
+
+
+def get_property_performance(brand_hash: str = None, days: int = 7) -> dict[str, dict]:
+    """Aggregate per-property events over N days.
+
+    Returns: {property_id: {viewed: N, shortlisted: N, visit_scheduled: N,
+              visit_attended: N, booking_initiated: N}}
+    """
+    from datetime import timedelta
+    today = date.today()
+    agg: dict[str, dict] = {}
+    for i in range(days):
+        day = (today - timedelta(days=i)).isoformat()
+        raw = get_property_events(day, brand_hash=brand_hash)
+        for field, count in raw.items():
+            parts = field.rsplit(":", 1)
+            if len(parts) != 2:
+                continue
+            prop_id, event = parts
+            if prop_id not in agg:
+                agg[prop_id] = {e: 0 for e in PROPERTY_EVENTS}
+            if event in agg[prop_id]:
+                agg[prop_id][event] += count
+    return agg
+
+
+# ---------------------------------------------------------------------------
 # WhatsApp message response tracking (dedup)
 # ---------------------------------------------------------------------------
 

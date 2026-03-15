@@ -21,6 +21,7 @@ Routes:
   POST   /admin/properties/{prop_id}/documents
   DELETE /admin/properties/{prop_id}/documents/{doc_id}
   POST   /admin/backfill-brands
+  POST   /admin/leads/{uid}/outcome
 """
 
 import asyncio
@@ -68,6 +69,10 @@ from db.redis_store import (
     get_tool_stats,
     get_routing_overrides,
     get_response_latency,
+    get_property_performance,
+    track_property_event,
+    track_funnel,
+    update_user_memory,
 )
 
 logger = get_logger("routers.admin")
@@ -238,6 +243,13 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
     bookings = funnel_totals.get("booking", 0)
     cost_per_booking_inr = round((total_cost_usd / bookings) * USD_TO_INR, 2) if bookings else None
 
+    # --- Property performance: aggregate across date range (Sprint 3) ---
+    property_perf = {}
+    try:
+        property_perf = get_property_performance(brand_hash=brand_hash, days=days)
+    except Exception as e:
+        logger.warning("property performance aggregation failed: %s", e)
+
     return {
         # KPI cards
         "total_messages": total_messages,
@@ -255,6 +267,8 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
         "tool_stats": tool_stats_agg,
         "routing": {"overrides": routing_agg, "accuracy_pct": routing_accuracy_pct},
         "latency": latency_agg,
+        # Property analytics (Sprint 3)
+        "property_performance": property_perf,
         # Extended data (kept for backward compat)
         "funnel": funnel_totals,
         "feedback": feedback,
@@ -272,20 +286,38 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
 # ---------------------------------------------------------------------------
 
 @router.get("/admin/conversations")
-async def admin_conversations(offset: int = 0, limit: int = 50, brand_hash: str = Depends(require_admin_brand_key)):
+async def admin_conversations(
+    offset: int = 0,
+    limit: int = 50,
+    filter: str = "",
+    brand_hash: str = Depends(require_admin_brand_key),
+):
     """Return paginated list of users sorted by most recent activity.
 
     Each entry contains enough metadata to render a conversation list row:
-    uid, name, phone, last_message preview, last_agent, lead_score, human_mode.
+    uid, name, phone, last_message preview, last_agent, lead_score, human_mode,
+    attention_flags.
+
+    Query params:
+      filter: "needs_attention" — return only users with non-empty attention flags
     """
-    total = get_brand_active_users_count(brand_hash)
-    uids = get_brand_active_users(brand_hash, offset=offset, limit=limit)
+    from core.attention import get_attention_flags
+
+    # Pull larger batch when filtering (need to scan then paginate)
+    fetch_limit = max(limit * 4, 200) if filter == "needs_attention" else limit
+    total_brand = get_brand_active_users_count(brand_hash)
+    uids = get_brand_active_users(brand_hash, offset=0 if filter else offset, limit=fetch_limit if filter else limit)
 
     rows = []
     for uid in uids:
         mem = get_user_memory(uid)
         conv = get_conversation(uid)
         human_mode = get_human_mode(uid, brand_hash=brand_hash)
+        attention_flags = get_attention_flags(uid)
+
+        # Apply filter: skip users without attention flags
+        if filter == "needs_attention" and not attention_flags:
+            continue
 
         # Last message preview (last non-empty text message)
         last_msg = ""
@@ -311,10 +343,19 @@ async def admin_conversations(offset: int = 0, limit: int = 50, brand_hash: str 
             "human_mode": human_mode,
             "message_count": len(conv),
             "cost_inr": round(cost_data.get("cost_usd", 0.0) * 95, 2),
+            "attention_flags": attention_flags,
         })
 
+    # When filtering, total is the filtered count and we paginate in-memory
+    if filter == "needs_attention":
+        total = len(rows)
+        page = rows[offset: offset + limit]
+    else:
+        total = total_brand
+        page = rows
+
     return {
-        "conversations": rows,
+        "conversations": page,
         "total": total,
         "offset": offset,
         "limit": limit,
@@ -340,6 +381,13 @@ async def admin_conversation_detail(uid: str, brand_hash: str = Depends(require_
     except Exception:
         followup_state = []
 
+    # Attention flags (Sprint 3)
+    try:
+        from core.attention import get_attention_flags
+        attention_flags = get_attention_flags(uid)
+    except Exception:
+        attention_flags = []
+
     return {
         "uid": uid,
         "messages": conv,
@@ -349,6 +397,7 @@ async def admin_conversation_detail(uid: str, brand_hash: str = Depends(require_
         "human_mode": human_mode,
         "last_agent": last_agent,
         "followup_state": followup_state,
+        "attention_flags": attention_flags,
     }
 
 
@@ -500,6 +549,10 @@ def _lead_row(uid: str) -> dict:
         "sharing_types":    prefs.get("sharing_types_enabled") or [],
         # Cost
         "cost_inr":         round(float(cost.get("cost_usd") or 0.0) * 95, 2),
+        # Outcome (Sprint 3)
+        "lead_outcome":     mem.get("lead_outcome") or "",
+        "outcome_notes":    mem.get("outcome_notes") or "",
+        "outcome_at":       mem.get("outcome_at") or "",
     }
 
 
@@ -509,6 +562,7 @@ async def admin_leads(
     area: str = "",
     budget_max: int = 0,
     days_since_active: int = 0,
+    outcome: str = "",
     q: str = "",
     offset: int = 0,
     limit: int = 25,
@@ -533,6 +587,10 @@ async def admin_leads(
 
         # Stage filter
         if stage and mem.get("funnel_max") != stage:
+            continue
+
+        # Outcome filter (Sprint 3)
+        if outcome and mem.get("lead_outcome", "") != outcome:
             continue
 
         # Area filter
@@ -575,6 +633,56 @@ async def admin_lead_detail(uid: str, brand_hash: str = Depends(require_admin_br
     row = _lead_row(uid)
     asyncio.create_task(pg.upsert_leads([row], brand_hash=brand_hash))
     return row
+
+
+class LeadOutcomeRequest(BaseModel):
+    outcome: str  # "converted" | "lost" | "no_show" | "in_progress"
+    notes: str = ""
+
+
+@router.post("/admin/leads/{uid}/outcome")
+async def admin_set_lead_outcome(uid: str, body: LeadOutcomeRequest, brand_hash: str = Depends(require_admin_brand_key)):
+    """Mark final outcome for a lead.
+
+    Outcomes: converted, lost, no_show, in_progress.
+    Side effects:
+      - converted: fires payment_completed funnel event + booking_initiated property event
+      - no_show: logs deal-breaker signal
+    """
+    _require_ownership(uid, brand_hash)
+
+    valid_outcomes = {"converted", "lost", "no_show", "in_progress"}
+    if body.outcome not in valid_outcomes:
+        raise HTTPException(status_code=400, detail=f"Invalid outcome. Must be one of: {', '.join(sorted(valid_outcomes))}")
+
+    # Update user memory with outcome
+    update_user_memory(
+        uid,
+        lead_outcome=body.outcome,
+        outcome_notes=body.notes,
+        outcome_at=datetime.utcnow().isoformat(),
+    )
+
+    # Side effects
+    if body.outcome == "converted":
+        try:
+            track_funnel(uid, "payment_completed", brand_hash=brand_hash)
+            # Track on the property they most recently interacted with
+            mem = get_user_memory(uid)
+            visited = mem.get("visits_attended", []) or mem.get("properties_visited", [])
+            if visited:
+                track_property_event(visited[-1], "booking_initiated", brand_hash=brand_hash)
+        except Exception:
+            pass
+
+    elif body.outcome == "no_show":
+        try:
+            from db.redis_store import add_deal_breaker
+            add_deal_breaker(uid, f"No-show (admin marked): {body.notes}" if body.notes else "No-show (admin marked)")
+        except Exception:
+            pass
+
+    return {"ok": True, "uid": uid, "outcome": body.outcome}
 
 
 # ---------------------------------------------------------------------------

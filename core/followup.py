@@ -176,6 +176,11 @@ def handle_followup_reply(user_id: str, message: str) -> str | None:
     if sentiment == "positive":
         # Track visit_attended funnel event
         track_funnel(user_id, "visit_attended", brand_hash=brand_hash)
+        try:
+            from db.redis_store import track_property_event
+            track_property_event(prop_id, "visit_attended", brand_hash=brand_hash)
+        except Exception:
+            pass
 
         # Update user memory
         mem = get_user_memory(user_id)

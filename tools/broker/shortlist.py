@@ -1,7 +1,7 @@
 import httpx
 
 from config import settings
-from db.redis_store import get_whitelabel_pg_ids, track_funnel, get_user_phone, record_property_shortlisted, schedule_followup, get_user_brand
+from db.redis_store import get_whitelabel_pg_ids, track_funnel, get_user_phone, record_property_shortlisted, schedule_followup, get_user_brand, track_property_event
 from core.log import get_logger
 from utils.properties import find_property
 
@@ -54,8 +54,13 @@ async def shortlist_property(user_id: str, property_name: str, **kwargs) -> str:
         msg = data.get("message", "unknown error")
         return f"Could not shortlist '{property_name}': {msg}. Please try again."
 
-    track_funnel(user_id, "shortlist", brand_hash=get_user_brand(user_id))
+    brand_hash_val = get_user_brand(user_id)
+    track_funnel(user_id, "shortlist", brand_hash=brand_hash_val)
     record_property_shortlisted(user_id, prop_id)
+    try:
+        track_property_event(prop_id, "shortlisted", brand_hash=brand_hash_val)
+    except Exception:
+        pass
 
     # Schedule follow-up: 48h after shortlisting (only if no visit scheduled)
     try:

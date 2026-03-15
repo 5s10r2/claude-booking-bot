@@ -132,6 +132,15 @@ async def run_pipeline(user_id: str, message: str) -> tuple[str, str, str]:
     # Save assistant response to history
     state.conversation.add_assistant_message(user_id, response, brand_hash=brand_hash)
 
+    # Compute + cache attention flags (fire-and-forget — never break main flow)
+    try:
+        from core.attention import update_attention_flags
+        conv = get_conversation(user_id)
+        mem = get_user_memory(user_id)
+        update_attention_flags(user_id, conv, mem, brand_hash=brand_hash)
+    except Exception:
+        pass
+
     return response, agent_name, language
 
 

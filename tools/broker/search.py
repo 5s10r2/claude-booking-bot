@@ -21,6 +21,7 @@ from db.redis_store import (
     update_user_memory,
     get_user_memory,
     get_user_brand,
+    track_property_event,
     _r as _redis,
 )
 from utils.api import parse_amenities, parse_sharing_types
@@ -441,9 +442,15 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     save_property_template(user_id, property_template[:5])
     track_funnel(user_id, "search", brand_hash=get_user_brand(user_id))
 
-    # Update cross-session memory
+    # Update cross-session memory + property-level analytics
+    brand_hash_val = get_user_brand(user_id)
     for info in property_template[:5]:
-        record_property_viewed(user_id, info.get("prop_id", ""))
+        pid = info.get("prop_id", "")
+        record_property_viewed(user_id, pid)
+        try:
+            track_property_event(pid, "viewed", brand_hash=brand_hash_val)
+        except Exception:
+            pass
     budget_str = ""
     if min_budget or max_budget:
         budget_str = f"₹{min_budget}-{max_budget}" if min_budget else f"up to ₹{max_budget}"
