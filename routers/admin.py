@@ -31,7 +31,7 @@ import traceback
 import uuid as uuid_lib
 from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -911,6 +911,24 @@ async def admin_get_documents(prop_id: str, brand_hash: str = Depends(require_ad
     return {"documents": docs}
 
 
+async def _embed_document_background(doc_id: int, text: str) -> None:
+    """Background task: embed document text and store vector in Postgres.
+
+    Fire-and-forget — failures are logged but never block the upload response.
+    """
+    try:
+        from config import settings
+        if not settings.SEMANTIC_KB_ENABLED:
+            return
+        from utils.embeddings import embed_documents
+        vectors = await embed_documents([text])
+        if vectors and len(vectors) == 1:
+            await pg.update_document_embedding(doc_id, vectors[0])
+            logger.info("Embedded document %d (%d dims)", doc_id, len(vectors[0]))
+    except Exception as e:
+        logger.warning("Background embed failed for doc %d: %s", doc_id, e)
+
+
 class UploadDocResponse(BaseModel):
     id: int
     filename: str
@@ -919,11 +937,26 @@ class UploadDocResponse(BaseModel):
 
 
 @router.post("/admin/properties/{prop_id}/documents")
-async def admin_upload_document(prop_id: str, file: UploadFile = File(...), brand_hash: str = Depends(require_admin_brand_key)):
-    """Upload a knowledge document (PDF, XLSX, CSV, TXT) for a property."""
+async def admin_upload_document(
+    prop_id: str,
+    file: UploadFile = File(...),
+    category: str = Form(""),
+    brand_hash: str = Depends(require_admin_brand_key),
+):
+    """Upload a knowledge document (PDF, XLSX, CSV, TXT) for a property.
+
+    Optional category: pricing_availability | living_experience | location_area | brand_story.
+    If provided, used for skill-based document filtering in the semantic KB.
+    """
     _require_property_ownership(prop_id, brand_hash)
     ALLOWED = {"pdf", "xlsx", "csv", "txt"}
+    VALID_CATEGORIES = {"pricing_availability", "living_experience", "location_area", "brand_story"}
     MAX_SIZE = 10 * 1024 * 1024  # 10 MB
+
+    # Validate category
+    cat = category.strip() if category else None
+    if cat and cat not in VALID_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"Invalid category: {cat}. Must be one of: {', '.join(sorted(VALID_CATEGORIES))}")
 
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if ext not in ALLOWED:
@@ -964,7 +997,14 @@ async def admin_upload_document(prop_id: str, file: UploadFile = File(...), bran
         file_type=ext,
         content_text=text,
         size_bytes=len(content),
+        category=cat,
     )
+
+    # Background: embed the document text for semantic retrieval
+    if text.strip():
+        import asyncio
+        asyncio.create_task(_embed_document_background(doc["id"], text))
+
     return doc
 
 

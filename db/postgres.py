@@ -12,16 +12,26 @@ logger = get_logger("db.postgres")
 _pool: Optional[asyncpg.Pool] = None
 
 
+_pgvector_available = False  # Set True after successful pgvector init
+
+
+async def _init_conn(conn) -> None:
+    """Per-connection init callback: register pgvector type if available."""
+    if _pgvector_available:
+        try:
+            from pgvector.asyncpg import register_vector
+            await register_vector(conn)
+        except Exception:
+            pass  # pgvector not available — silently skip
+
+
 async def init_pool() -> None:
     global _pool
     try:
+        pool_kwargs = dict(min_size=2, max_size=10, init=_init_conn)
         if settings.DATABASE_URL:
             # Render / managed Postgres provides a URL
-            _pool = await asyncpg.create_pool(
-                dsn=settings.DATABASE_URL,
-                min_size=2,
-                max_size=10,
-            )
+            _pool = await asyncpg.create_pool(dsn=settings.DATABASE_URL, **pool_kwargs)
         else:
             _pool = await asyncpg.create_pool(
                 host=settings.DB_HOST,
@@ -29,8 +39,7 @@ async def init_pool() -> None:
                 user=settings.DB_USER,
                 password=settings.DB_PASSWORD,
                 database=settings.DB_NAME,
-                min_size=2,
-                max_size=10,
+                **pool_kwargs,
             )
         logger.info("Connection pool created")
     except Exception as e:
@@ -174,17 +183,18 @@ async def insert_property_document(
     file_type: str,
     content_text: str,
     size_bytes: int,
+    category: Optional[str] = None,
 ) -> dict:
     """Insert a document and return its metadata."""
     if _pool is None:
         raise RuntimeError("Database not available")
     row = await _pool.fetchrow(
         """
-        INSERT INTO property_documents (property_id, filename, file_type, content_text, size_bytes)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING id, property_id, filename, file_type, size_bytes, uploaded_at
+        INSERT INTO property_documents (property_id, filename, file_type, content_text, size_bytes, category)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, property_id, filename, file_type, size_bytes, category, uploaded_at
         """,
-        property_id, filename, file_type, content_text, size_bytes,
+        property_id, filename, file_type, content_text, size_bytes, category,
     )
     return {
         "id":          row["id"],
@@ -192,6 +202,7 @@ async def insert_property_document(
         "filename":    row["filename"],
         "file_type":   row["file_type"],
         "size_bytes":  row["size_bytes"],
+        "category":    row["category"],
         "uploaded_at": row["uploaded_at"].isoformat(),
     }
 
@@ -202,7 +213,7 @@ async def get_property_documents(property_id: str) -> list[dict]:
         return []
     rows = await _pool.fetch(
         """
-        SELECT id, property_id, filename, file_type, size_bytes, uploaded_at
+        SELECT id, property_id, filename, file_type, size_bytes, category, uploaded_at
         FROM property_documents
         WHERE property_id = $1
         ORDER BY uploaded_at DESC
@@ -216,6 +227,7 @@ async def get_property_documents(property_id: str) -> list[dict]:
             "filename":    r["filename"],
             "file_type":   r["file_type"],
             "size_bytes":  r["size_bytes"],
+            "category":    r["category"],
             "uploaded_at": r["uploaded_at"].isoformat(),
         }
         for r in rows
@@ -365,6 +377,120 @@ async def delete_property_document(property_id: str, doc_id: int) -> bool:
         doc_id, property_id,
     )
     return result == "DELETE 1"
+
+
+# ---------------------------------------------------------------------------
+# pgvector — semantic KB retrieval
+# ---------------------------------------------------------------------------
+
+async def enable_pgvector() -> None:
+    """Enable pgvector extension + add embedding columns (idempotent, called on startup).
+
+    Sets _pgvector_available = True on success so the pool init callback
+    registers the vector type on new connections.
+    """
+    global _pgvector_available
+    if _pool is None:
+        return
+    try:
+        await _pool.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        await _pool.execute("""
+            ALTER TABLE property_documents
+                ADD COLUMN IF NOT EXISTS category VARCHAR(30),
+                ADD COLUMN IF NOT EXISTS embedding vector(256);
+        """)
+        _pgvector_available = True
+        logger.info("pgvector enabled, embedding columns ready")
+    except Exception as e:
+        logger.warning("pgvector setup skipped (non-critical): %s", e)
+        _pgvector_available = False
+
+
+async def update_document_embedding(doc_id: int, embedding: list[float]) -> None:
+    """Set the embedding vector for a document (called after background embed)."""
+    if _pool is None or not _pgvector_available:
+        return
+    try:
+        import numpy as np
+        vec = np.array(embedding, dtype=np.float32)
+        await _pool.execute(
+            "UPDATE property_documents SET embedding = $1 WHERE id = $2",
+            vec, doc_id,
+        )
+    except Exception as e:
+        logger.warning("update_document_embedding(%s): %s", doc_id, e)
+
+
+async def search_relevant_docs(
+    query_embedding: list[float],
+    property_ids: list[str],
+    categories: list[str],
+    limit: int = 5,
+) -> list[dict]:
+    """Semantic search: find top-k docs by cosine similarity.
+
+    Pre-filters by property_ids and categories, then ranks by embedding distance.
+    Returns list of {property_id, filename, text} dicts (same format as get_property_documents_text).
+    """
+    if _pool is None or not _pgvector_available:
+        return []
+    if not property_ids or not categories or not query_embedding:
+        return []
+    try:
+        import numpy as np
+        vec = np.array(query_embedding, dtype=np.float32)
+        rows = await _pool.fetch(
+            """
+            SELECT property_id, filename, content_text
+            FROM property_documents
+            WHERE property_id = ANY($1::varchar[])
+              AND category = ANY($2::varchar[])
+              AND embedding IS NOT NULL
+            ORDER BY embedding <=> $3
+            LIMIT $4
+            """,
+            property_ids, categories, vec, limit,
+        )
+        return [
+            {"property_id": r["property_id"], "filename": r["filename"], "text": r["content_text"]}
+            for r in rows
+        ]
+    except Exception as e:
+        logger.warning("search_relevant_docs error: %s", e)
+        return []
+
+
+async def get_docs_by_category(
+    property_ids: list[str],
+    categories: list[str],
+    limit: int = 10,
+) -> list[dict]:
+    """Category-filtered text dump (fallback when embeddings unavailable).
+
+    Returns docs filtered by category but without similarity ranking.
+    Same output format as get_property_documents_text.
+    """
+    if _pool is None or not property_ids or not categories:
+        return []
+    try:
+        rows = await _pool.fetch(
+            """
+            SELECT property_id, filename, content_text
+            FROM property_documents
+            WHERE property_id = ANY($1::varchar[])
+              AND category = ANY($2::varchar[])
+            ORDER BY uploaded_at DESC
+            LIMIT $3
+            """,
+            property_ids, categories, limit,
+        )
+        return [
+            {"property_id": r["property_id"], "filename": r["filename"], "text": r["content_text"]}
+            for r in rows
+        ]
+    except Exception as e:
+        logger.warning("get_docs_by_category error: %s", e)
+        return []
 
 
 async def create_error_events_table() -> None:

@@ -3,6 +3,7 @@ skill: search
 tools: [save_preferences, search_properties, fetch_properties_by_query]
 depends: [qualify_new, qualify_returning]
 description: "Property search workflow: save prefs → search → show results"
+doc_categories: [pricing_availability]
 ---
 
 <instructions>

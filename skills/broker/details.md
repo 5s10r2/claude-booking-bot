@@ -3,6 +3,7 @@ skill: details
 tools: [fetch_property_details, fetch_room_details, fetch_property_images]
 depends: []
 description: "Property details, images, and room information"
+doc_categories: [living_experience]
 ---
 
 <instructions>

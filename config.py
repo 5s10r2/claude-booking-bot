@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: Optional[str] = None  # Tavily search API key for web intelligence
     WEB_SEARCH_MAX_PER_CONVERSATION: int = 3  # max web searches per conversation
 
+    # Semantic KB (embedding-powered document retrieval)
+    NOMIC_API_KEY: str = ""  # Nomic Atlas API key. Empty = semantic retrieval disabled, falls back to old text dump.
+    SEMANTIC_KB_ENABLED: bool = False  # Master switch. Must be explicitly enabled after pgvector + API key are ready.
+
     # Feature flags
     KYC_ENABLED: bool = False  # Set KYC_ENABLED=true in env to re-enable Aadhaar verification
     PAYMENT_REQUIRED: bool = False  # Token payment before reservation. Toggle ON in admin panel when needed.

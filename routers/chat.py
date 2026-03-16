@@ -192,7 +192,7 @@ async def chat_stream(req: ChatRequest):
     # Get agent config (with language + skills for broker)
     if agent_name == "broker":
         cfg = broker_agent.get_config(req.user_id, language=language, skills=skills)
-        await broker_agent._inject_doc_context(cfg)
+        await broker_agent._inject_doc_context(cfg, user_message=req.message)
     else:
         config_map = {
             "default": default_agent.get_config,

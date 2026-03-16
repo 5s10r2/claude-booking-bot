@@ -3,6 +3,7 @@ skill: compare
 tools: [compare_properties, fetch_landmarks, fetch_nearby_places]
 depends: []
 description: "Side-by-side property comparison with recommendation"
+doc_categories: [pricing_availability, living_experience, location_area]
 ---
 
 <instructions>

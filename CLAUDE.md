@@ -28,7 +28,7 @@ Two-channel chatbot: **WhatsApp** (webhook at `/whatsapp`, Meta/Interakt APIs) a
 ### Entry Points
 ```
 main.py              (129)  — FastAPI app factory | lifespan: init pools, create tables, add_brand_hash_columns migration, init_registry, auto-seed brand configs (_SEED_BRANDS)
-config.py            (58)   — Pydantic settings | Settings@5 (models, rate limits, feature flags: KYC_ENABLED, PAYMENT_REQUIRED, DYNAMIC_SKILLS_ENABLED)
+config.py            (62)   — Pydantic settings | Settings@5 (models, rate limits, feature flags: KYC_ENABLED, PAYMENT_REQUIRED, DYNAMIC_SKILLS_ENABLED, SEMANTIC_KB_ENABLED, NOMIC_API_KEY)
 core/state.py        (16)   — Shared singletons | engine, conversation (set by lifespan, imported as `import core.state as state` everywhere)
 core/auth.py         (53)   — Auth helpers | verify_api_key (legacy), require_brand_api_key (brand CRUD), require_admin_brand_key (admin endpoints — validates brand config exists, returns brand_hash), CHAT_BASE_URL
 core/pipeline.py     (152)  — Shared pipeline | run_pipeline@32 (chat + WhatsApp both call this; brand-scoped human mode + analytics), _route_agent@113 (supervisor → agent dispatch)
@@ -65,7 +65,7 @@ core/ui_parts.py     (865)  — Backend-controlled Generative UI parts | generat
 ```
 agents/supervisor.py      (48)  — Intent routing | route@18 (classifies → {"agent": str, "skills": list[str]}). Skills only for broker agent.
 agents/booking_agent.py   (60)  — Reserve, pay, visit, call, cancel, reschedule, KYC | get_config@15
-agents/broker_agent.py    (131) — Search, details, images, landmarks, nearby, shortlist | get_config@22 (dual-path: dynamic skills vs legacy monolithic, controlled by DYNAMIC_SKILLS_ENABLED). Dynamic path: build_skill_prompt → filtered tools → split caching. Accepts skills param from supervisor.
+agents/broker_agent.py    (180) — Search, details, images, landmarks, nearby, shortlist | get_config@22 (dual-path: dynamic skills vs legacy monolithic, controlled by DYNAMIC_SKILLS_ENABLED). Dynamic path: build_skill_prompt → filtered tools → split caching. Accepts skills param from supervisor. _inject_doc_context: 3-tier semantic KB retrieval (semantic → category → full dump).
 agents/profile_agent.py   (60)  — User details, events, shortlisted | get_config@15
 agents/default_agent.py   (62)  — Greetings, brand info, general help | get_config@15
 ```
@@ -133,12 +133,13 @@ utils/retry.py      (148) — Async retry decorator (2 retries, exponential back
 utils/properties.py (20)  — Shared property lookup (exact + substring match) | find_property@4
 utils/api.py        (25)  — Rentok API response validation | check_rentok_response@14, RentokAPIError@8
 utils/property_docs.py (35) — KB document formatting | format_property_docs@8 (list[dict]→str, max 8000 chars, injected into broker prompt)
+utils/embeddings.py  (50)  — Nomic Atlas embedding client (raw httpx, no SDK) | embed_documents@25 (search_document task), embed_query@35 (search_query task). 256-dim Matryoshka. All failures → None (callers fall back).
 ```
 
 ### Skills (Dynamic Skill System — broker agent only)
 ```
 skills/__init__.py           (0)   — Package init
-skills/loader.py             (55)  — Skill file loading + YAML frontmatter parsing + memory cache (30s) + hot-reload | load_skill@17, build_skill_prompt@38 → (base_prompt, skill_prompt)
+skills/loader.py             (55)  — Skill file loading + YAML frontmatter parsing + memory cache (30s) + hot-reload | load_skill@17, build_skill_prompt@38 → (base_prompt, skill_prompt, doc_categories)
 skills/skill_map.py          (85)  — Skill→tool mapping + keyword fallback | SKILL_TOOLS dict, ALWAYS_TOOLS, get_tools_for_skills@52, detect_skills_heuristic@68
 skills/broker/_base.md       (3.6k) — ALWAYS loaded: identity, response format, never-rules, mappings, footer
 skills/broker/qualify_new.md (2.0k) — New user bundled qualifying (2 examples)
@@ -336,9 +337,12 @@ Frontend (Phase A): `eazypg-chat/src/stream.js` uses AbortController + requestCo
 
 ### New Postgres Tables
 ```
-property_documents — id, property_id, filename, file_type, content_text, size_bytes, uploaded_at
-                     Created on startup via pg.create_property_documents_table()
-                     KB injection: get_property_documents_text(prop_ids) → broker prompt
+property_documents — id, property_id, filename, file_type, content_text, size_bytes, category, embedding, uploaded_at
+                     Created on startup via pg.create_property_documents_table() + pg.enable_pgvector()
+                     category: pricing_availability | living_experience | location_area | brand_story
+                     embedding: vector(256) — nomic-embed-text-v1.5 Matryoshka, populated on upload
+                     KB injection: 3-tier fallback: semantic search → category-filtered dump → full dump
+                     Feature flag: SEMANTIC_KB_ENABLED (default false)
 
 error_events         — id, user_id, brand_hash, error_type, error_source, error_message, context (JSONB), created_at
                      Created on startup via pg.create_error_events_table()
@@ -381,9 +385,9 @@ GET  /brand-config?token={uuid}                       — PUBLIC, no auth — re
 - **PostgreSQL**: Render managed (via `DATABASE_URL` env var)
 - **Rentok API**: `https://apiv2.rentok.com` (set via `RENTOK_API_BASE_URL`)
 - **Models**: Broker=Haiku (`claude-haiku-4-5-20251001`), Others=Sonnet (`claude-sonnet-4-6`)
-- **Feature flags**: `KYC_ENABLED=false`, `PAYMENT_REQUIRED=false`, `DYNAMIC_SKILLS_ENABLED=true` — global defaults, overridable per-brand via admin panel (stored in `brand_flags:{brand_hash}`)
+- **Feature flags**: `KYC_ENABLED=false`, `PAYMENT_REQUIRED=false`, `DYNAMIC_SKILLS_ENABLED=true`, `SEMANTIC_KB_ENABLED=false` — global defaults, overridable per-brand via admin panel (stored in `brand_flags:{brand_hash}`)
 - **Rate limits**: 6/min per user, 30/hr per user, 100/min global
-- **New env vars**: `OSRM_API_KEY` (OSRM routing), `TAVILY_API_KEY` (optional, web search), `WEB_SEARCH_MAX_PER_CONVERSATION=3`
+- **New env vars**: `OSRM_API_KEY` (OSRM routing), `TAVILY_API_KEY` (optional, web search), `WEB_SEARCH_MAX_PER_CONVERSATION=3`, `NOMIC_API_KEY` (Nomic Atlas — semantic KB embeddings, optional)
 - **Brand config env var**: `CHAT_BASE_URL` on backend (default: `https://eazypg-chat.vercel.app`) — used to build chatbot URL returned by GET /admin/brand-config
 
 ## Task Recipes

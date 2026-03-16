@@ -92,7 +92,7 @@ def get_config(user_id: str, language: str = "en", skills: list[str] | None = No
     log.info("user=%s skills=%s", user_id, skills)
 
     # Build two-block prompt: base (cached) + dynamic skills (NOT cached)
-    base_prompt, skill_prompt = build_skill_prompt("broker", skills, **template_vars)
+    base_prompt, skill_prompt, doc_categories = build_skill_prompt("broker", skills, **template_vars)
 
     # Filter tools to match loaded skills
     tool_names = get_tools_for_skills(skills)
@@ -110,22 +110,69 @@ def get_config(user_id: str, language: str = "en", skills: list[str] | None = No
         "executor": executor,
         "skills": skills,
         "prop_ids": get_property_id_for_search(user_id),
+        "doc_categories": doc_categories,
     }
 
 
-async def _inject_doc_context(cfg: dict) -> None:
-    """Fetch property docs for pinned search results and append to system prompt.
+async def _inject_doc_context(cfg: dict, user_message: str = "") -> None:
+    """Fetch relevant property docs and append to system prompt.
+
+    Uses a 3-tier fallback chain:
+      1. Semantic search (embed user query → cosine similarity vs doc embeddings, filtered by skill categories)
+      2. Category-filtered text dump (if embeddings unavailable)
+      3. Full text dump of all docs (legacy — if categories unavailable)
 
     Best-effort: silently skips if DB unavailable or no docs found.
-    Pops 'prop_ids' from cfg so callers don't pass it to the API.
+    Pops 'prop_ids' and 'doc_categories' from cfg so callers don't pass them to the API.
     """
     prop_ids = cfg.pop("prop_ids", [])
+    doc_categories = cfg.pop("doc_categories", [])
     if not prop_ids:
         return
+
     try:
+        from config import settings
         from db import postgres as pg
         from utils.property_docs import format_property_docs
-        docs = await pg.get_property_documents_text(prop_ids[:3])
+
+        docs = None
+        top_ids = prop_ids[:3]
+
+        # Tier 1: Semantic search (requires feature flag + user message + embeddings)
+        if settings.SEMANTIC_KB_ENABLED and user_message and doc_categories:
+            try:
+                from utils.embeddings import embed_query
+                query_vec = await embed_query(user_message)
+                if query_vec:
+                    docs = await pg.search_relevant_docs(
+                        query_embedding=query_vec,
+                        property_ids=top_ids,
+                        categories=doc_categories,
+                        limit=5,
+                    )
+                    if docs:
+                        log.debug("Semantic KB: %d docs retrieved for query", len(docs))
+            except Exception as e:
+                log.debug("Semantic search fallback: %s", e)
+                docs = None
+
+        # Tier 2: Category-filtered dump (if semantic search didn't produce results)
+        if not docs and settings.SEMANTIC_KB_ENABLED and doc_categories:
+            try:
+                docs = await pg.get_docs_by_category(
+                    property_ids=top_ids,
+                    categories=doc_categories,
+                    limit=10,
+                )
+                if docs:
+                    log.debug("Category KB: %d docs retrieved", len(docs))
+            except Exception:
+                docs = None
+
+        # Tier 3: Full dump (legacy fallback)
+        if not docs:
+            docs = await pg.get_property_documents_text(top_ids)
+
         if docs:
             doc_ctx = format_property_docs(docs)
             sp = cfg["system_prompt"]
@@ -146,7 +193,13 @@ async def run(
     skills: list[str] | None = None,
 ) -> str:
     cfg = get_config(user_id, language=language, skills=skills)
-    await _inject_doc_context(cfg)
+    # Extract last user message for semantic KB retrieval
+    last_user_msg = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user_msg = m.get("content", "") if isinstance(m.get("content"), str) else ""
+            break
+    await _inject_doc_context(cfg, user_message=last_user_msg)
 
     original_executor = engine.tool_executor
     engine.tool_executor = cfg["executor"]

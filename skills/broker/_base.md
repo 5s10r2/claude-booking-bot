@@ -1,6 +1,7 @@
 ---
 skill: _base
 description: "Core identity, response format, never-rules, mappings. Always loaded."
+doc_categories: [brand_story]
 ---
 
 <identity>

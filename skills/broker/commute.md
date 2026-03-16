@@ -3,6 +3,7 @@ skill: commute
 tools: [estimate_commute, fetch_landmarks]
 depends: []
 description: "Commute estimation with driving time and transit routes"
+doc_categories: [location_area]
 ---
 
 <instructions>

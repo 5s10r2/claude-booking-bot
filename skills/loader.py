@@ -88,17 +88,18 @@ def build_skill_prompt(
     agent: str,
     skills: list[str],
     **template_vars: Any,
-) -> tuple[str, str]:
+) -> tuple[str, str, list[str]]:
     """Build a two-block system prompt from skill files.
 
-    Returns (base_prompt, skill_prompt):
-        base_prompt  — Marked for caching via cache_control: ephemeral in core/claude.py.
-                       Current size: ~3,800 chars ≈ ~950 tokens. Note: Haiku 4.5 requires
-                       ≥4,096 tokens for prompt caching to activate. With filtered tools
-                       (~600-1,200 tokens), total is ~1,550-2,150 tokens — below threshold.
-                       Cache silently skips on small turns; this is acceptable since token
-                       savings from loading fewer skills already offset the miss.
-        skill_prompt — Dynamic per turn (instructions + examples for 2-4 skills). NOT cached.
+    Returns (base_prompt, skill_prompt, doc_categories):
+        base_prompt    — Marked for caching via cache_control: ephemeral in core/claude.py.
+                         Current size: ~3,800 chars ≈ ~950 tokens. Note: Haiku 4.5 requires
+                         ≥4,096 tokens for prompt caching to activate. With filtered tools
+                         (~600-1,200 tokens), total is ~1,550-2,150 tokens — below threshold.
+                         Cache silently skips on small turns; this is acceptable since token
+                         savings from loading fewer skills already offset the miss.
+        skill_prompt   — Dynamic per turn (instructions + examples for 2-4 skills). NOT cached.
+        doc_categories — Union of all loaded skills' doc_categories (for semantic KB retrieval).
 
     Template variables (e.g. {brand_name}, {language_directive}) are injected
     using the existing ``format_prompt`` from ``core.prompts``.
@@ -109,18 +110,23 @@ def build_skill_prompt(
     base_data = load_skill(agent, "_base")
     base = format_prompt(base_data["content"], **template_vars)
 
+    # Collect doc_categories from _base
+    all_categories: set[str] = set(base_data["meta"].get("doc_categories", []))
+
     # Dynamic skill sections
     skill_sections: list[str] = []
     for skill_name in skills:
         try:
             data = load_skill(agent, skill_name)
             skill_sections.append(data["content"])
+            # Accumulate doc_categories from each skill
+            all_categories.update(data["meta"].get("doc_categories", []))
         except FileNotFoundError:
             log.warning("Skill file not found: %s/%s.md — skipping", agent, skill_name)
 
     skill_prompt = format_prompt("\n\n".join(skill_sections), **template_vars)
 
-    return base, skill_prompt
+    return base, skill_prompt, sorted(all_categories)
 
 
 def clear_cache() -> None:

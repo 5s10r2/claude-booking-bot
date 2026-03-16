@@ -3,6 +3,7 @@ skill: selling
 tools: []
 depends: []
 description: "Selling techniques: objection handling, scarcity, value framing, proactive recommendations"
+doc_categories: [pricing_availability, brand_story]
 ---
 
 <instructions>

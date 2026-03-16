@@ -78,6 +78,7 @@ async def lifespan(app: FastAPI):
     # Startup
     await pg.init_pool()
     await pg.create_property_documents_table()
+    await pg.enable_pgvector()  # Semantic KB — pgvector extension + embedding columns
     await pg.create_leads_table()
     await pg.add_brand_hash_columns()  # Phase 2B migration — idempotent
     await pg.create_error_events_table()  # Sprint 4 — structured error log
