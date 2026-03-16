@@ -918,7 +918,7 @@ async def _embed_document_background(doc_id: int, text: str) -> None:
     """
     try:
         from config import settings
-        if not settings.SEMANTIC_KB_ENABLED:
+        if not settings.NOMIC_API_KEY:
             return
         from utils.embeddings import embed_documents
         vectors = await embed_documents([text])

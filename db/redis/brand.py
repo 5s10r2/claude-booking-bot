@@ -84,6 +84,7 @@ def get_effective_flags(brand_hash: str | None = None) -> dict:
         "DYNAMIC_SKILLS_ENABLED": settings.DYNAMIC_SKILLS_ENABLED,
         "KYC_ENABLED": settings.KYC_ENABLED,
         "PAYMENT_REQUIRED": settings.PAYMENT_REQUIRED,
+        "SEMANTIC_KB_ENABLED": settings.SEMANTIC_KB_ENABLED,
     }
     if brand_hash:
         overrides = get_brand_flags(brand_hash)

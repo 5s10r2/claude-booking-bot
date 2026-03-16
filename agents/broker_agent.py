@@ -63,6 +63,7 @@ def get_config(user_id: str, language: str = "en", skills: list[str] | None = No
             "model": settings.HAIKU_MODEL,
             "executor": executor,
             "prop_ids": get_property_id_for_search(user_id),
+            "semantic_kb_enabled": flags.get("SEMANTIC_KB_ENABLED", settings.SEMANTIC_KB_ENABLED),
         }
 
     # ── Dynamic skill path ─────────────────────────────────────────────
@@ -111,6 +112,7 @@ def get_config(user_id: str, language: str = "en", skills: list[str] | None = No
         "skills": skills,
         "prop_ids": get_property_id_for_search(user_id),
         "doc_categories": doc_categories,
+        "semantic_kb_enabled": flags.get("SEMANTIC_KB_ENABLED", settings.SEMANTIC_KB_ENABLED),
     }
 
 
@@ -127,11 +129,11 @@ async def _inject_doc_context(cfg: dict, user_message: str = "") -> None:
     """
     prop_ids = cfg.pop("prop_ids", [])
     doc_categories = cfg.pop("doc_categories", [])
+    semantic_kb = cfg.pop("semantic_kb_enabled", False)
     if not prop_ids:
         return
 
     try:
-        from config import settings
         from db import postgres as pg
         from utils.property_docs import format_property_docs
 
@@ -139,7 +141,7 @@ async def _inject_doc_context(cfg: dict, user_message: str = "") -> None:
         top_ids = prop_ids[:3]
 
         # Tier 1: Semantic search (requires feature flag + user message + embeddings)
-        if settings.SEMANTIC_KB_ENABLED and user_message and doc_categories:
+        if semantic_kb and user_message and doc_categories:
             try:
                 from utils.embeddings import embed_query
                 query_vec = await embed_query(user_message)
@@ -157,7 +159,7 @@ async def _inject_doc_context(cfg: dict, user_message: str = "") -> None:
                 docs = None
 
         # Tier 2: Category-filtered dump (if semantic search didn't produce results)
-        if not docs and settings.SEMANTIC_KB_ENABLED and doc_categories:
+        if not docs and semantic_kb and doc_categories:
             try:
                 docs = await pg.get_docs_by_category(
                     property_ids=top_ids,
