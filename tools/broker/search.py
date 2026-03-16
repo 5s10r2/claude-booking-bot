@@ -12,6 +12,7 @@ from db.redis_store import (
     get_preferences,
     get_property_info_map,
     set_property_info_map,
+    set_property_id_for_search,
     set_last_search_results,
     save_property_template,
     get_whitelabel_pg_ids,
@@ -442,6 +443,11 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         )
 
     set_property_info_map(user_id, existing_map)
+
+    # Save pg_ids for KB doc injection in broker agent (uses brand-config pg_id, not Rentok UUID)
+    kb_ids = [info["pg_id"] for info in property_template[:5] if info.get("pg_id")]
+    if kb_ids:
+        set_property_id_for_search(user_id, kb_ids)
 
     # Cache summary of top-10 results for cross-session context (24h TTL)
     set_last_search_results(user_id, [
