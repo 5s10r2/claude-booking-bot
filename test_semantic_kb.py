@@ -11,10 +11,25 @@ import asyncio, httpx, json, time, sys, uuid
 BASE_URL = "https://claude-booking-bot.onrender.com"
 API_KEY = "OxOtel1234"
 HEADERS = {"X-API-Key": API_KEY}
-PROP_ID = "l5zf3ckOnRQV9OHdv5YTTXkvLHp1"
+PROP_ID = "UaDCGP3dzzZRgVIzBDgXb5ry5ng2"   # Kurla property — appears consistently in searches
 TEST_UID = f"skb_{uuid.uuid4().hex[:6]}"
 
-DOC_PRICING = """OxOtel Andheri West — Pricing Guide (March 2026)
+# OxOtel brand account_values — includes pg_ids so search_properties can filter by brand properties.
+# The browser widget fetches these from /brand-config?token=... and passes them here; in tests we
+# must include them explicitly, otherwise get_whitelabel_pg_ids returns [] and search returns nothing.
+OXOTEL_ACCOUNT_VALUES = {
+    "brand": "cdeaa3d2-3d82-4a36-9e94-e4985e4bdcbc",
+    "brand_hash": "5cbc221962dfae5a",
+    "pg_ids": [
+        "l5zf3ckOnRQV9OHdv5YTTXkvLHp1", "egu5HmrYFMP8MRJyMsefnpaL7ka2",
+        "Z2wyLOXXp5QA596DQ6aZAQpakmQ2", "UaDCGP3dzzZRgVIzBDgXb5ry5ng2",
+        "EqhTMiUNksgXh5QhGQRsY5DQiO42", "fzDBxYtHgVV21ertfkUdSHeomiv2",
+        "CUxtdeaGxYS8IMXmGZ1yUnqyfOn2", "wtlUSKV9H8bkNqvlGmnogwoqwyk2",
+        "1Dy0t6YeIHh3kQhqvQR8tssHWKt1", "U2uYCaeiCebrE95iUDsS4PwEd1J2",
+    ],
+}
+
+DOC_PRICING = """OxOtel Kurla — Pricing Guide (March 2026)
 - Triple sharing: ₹7,500/month
 - Double sharing: ₹9,500/month
 - Single room: ₹18,000/month
@@ -24,12 +39,12 @@ DOC_PRICING = """OxOtel Andheri West — Pricing Guide (March 2026)
 - Long-stay: 15% off for 6-month commitment
 """
 
-DOC_LOCATION = """OxOtel Andheri West — Location Guide
-- DN Nagar Metro: 5-min walk (Line 1)
-- Andheri Railway Station: 15-min walk (Western Line)
-- Lokhandwala Market: 8-min walk
-- Infinity Mall: 12-min walk
-- Mumbai Airport: 4km by auto
+DOC_LOCATION = """OxOtel Kurla — Location Guide
+- Kurla Railway Station: 5-min walk (Central Line + Harbour Line)
+- LBS Road: 2-min walk
+- Phoenix Marketcity: 10-min walk
+- BKC: 15-min by auto
+- Mumbai Airport: 8km
 """
 
 scores = []
@@ -100,49 +115,61 @@ async def main():
         cats = [d.get("category") for d in our]
         check("T5 Docs have categories", len(our) == 2 and all(cats), f"cats={cats}")
 
-        # T6: Search first to populate property IDs, then ask pricing (2 Haiku calls)
-        print("\n  💬 T6a: Search to build context (1 Haiku call)...")
+        # T6: Full search with qualifiers to bypass bot qualifying questions, then ask pricing
+        # Include gender + budget + location in one shot so the broker agent searches immediately.
+        print("\n  💬 T6a: Full search (gender + budget + location — 1 Haiku call)...")
         r = await c.post("/chat", headers={**HEADERS, "Content-Type": "application/json"},
-                         json={"message": "Show me PGs in Andheri West",
+                         json={"message": "Show me PGs in Kurla Mumbai, any type, budget ₹12,000",
                                "user_id": TEST_UID,
-                               "account_values": {"brand": "OxOtel"}})
+                               "account_values": OXOTEL_ACCOUNT_VALUES})
         t6a_ok = r.status_code == 200
         if t6a_ok:
             body = r.json()
             reply = body.get("response", "") or body.get("reply", "") or str(body)
-            print(f"       Search reply: {reply[:150]}...")
-        check("T6a Search context", t6a_ok, f"HTTP {r.status_code}")
+            print(f"       Search reply (first 200): {reply[:200]}")
+            # Confirm a real search ran (not just qualifier questions)
+            search_ran = any(k in reply.lower() for k in ["result", "found", "option", "property", "pg", "₹", "kurla", "here", "available"])
+        check("T6a Search triggered", t6a_ok and search_ran if t6a_ok else False,
+              f"search_ran={search_ran}" if t6a_ok else f"HTTP {r.status_code}")
 
         print("  💬 T6b: Pricing question (1 Haiku call)...")
         r = await c.post("/chat", headers={**HEADERS, "Content-Type": "application/json"},
-                         json={"message": "What is the monthly rent for double sharing? Any discounts?",
+                         json={"message": "What are the pricing details and any discounts available?",
                                "user_id": TEST_UID,
-                               "account_values": {"brand": "OxOtel"}})
+                               "account_values": OXOTEL_ACCOUNT_VALUES})
         if r.status_code == 200:
             body = r.json()
             reply = body.get("response", "") or body.get("reply", "") or str(body)
-            kws = ["9,500", "9500", "discount", "15%", "10%", "deposit", "7,500", "7500", "rent", "₹"]
-            hits = [k for k in kws if k.lower() in reply.lower()]
-            print(f"       Reply preview: {reply[:250]}")
-            check("T6b Pricing retrieval", len(hits) >= 1, f"matched: {hits}")
+            # Strict KB content check — ₹9,500 or ₹7,500 from the uploaded doc specifically
+            strict_kws = ["9,500", "9500", "7,500", "7500", "10%", "15%", "18,000"]
+            loose_kws  = ["deposit", "token", "discount", "₹", "rent"]
+            strict_hits = [k for k in strict_kws if k in reply]
+            loose_hits  = [k for k in loose_kws  if k.lower() in reply.lower()]
+            print(f"       Reply preview: {reply[:350]}")
+            print(f"       Strict KB hits: {strict_hits}  |  Loose hits: {loose_hits}")
+            kb_ok = len(strict_hits) >= 1
+            check("T6b Pricing KB injection", kb_ok,
+                  f"strict_hits={strict_hits}" if kb_ok else
+                  f"No specific pricing from doc. loose_hits={loose_hits}")
         else:
-            check("T6b Pricing retrieval", False, f"HTTP {r.status_code}: {r.text[:150]}")
+            check("T6b Pricing KB injection", False, f"HTTP {r.status_code}: {r.text[:150]}")
 
-        # T7: Location question on same user (already has search context)
+        # T7: Location question on same user (KB docs already injected via search context)
         print("\n  💬 T7: Location question (1 Haiku call)...")
         r = await c.post("/chat", headers={**HEADERS, "Content-Type": "application/json"},
-                         json={"message": "How far is the nearest metro station from this property?",
+                         json={"message": "How far is the nearest railway station from this PG?",
                                "user_id": TEST_UID,
-                               "account_values": {"brand": "OxOtel"}})
+                               "account_values": OXOTEL_ACCOUNT_VALUES})
         if r.status_code == 200:
             body = r.json()
             reply = body.get("response", "") or body.get("reply", "") or str(body)
-            kws = ["dn nagar", "metro", "5 min", "5-min", "walk", "andheri", "line 1", "station"]
+            # Doc says "Kurla Railway Station: 5-min walk"
+            kws = ["kurla", "railway", "station", "5-min", "5 min", "walk", "central", "harbour", "lbs"]
             hits = [k for k in kws if k.lower() in reply.lower()]
             print(f"       Reply preview: {reply[:250]}")
-            check("T7 Location retrieval", len(hits) >= 1, f"matched: {hits}")
+            check("T7 Location KB injection", len(hits) >= 1, f"matched: {hits}")
         else:
-            check("T7 Location retrieval", False, f"HTTP {r.status_code}: {r.text[:150]}")
+            check("T7 Location KB injection", False, f"HTTP {r.status_code}: {r.text[:150]}")
 
         # Cleanup
         print("\n  🧹 Cleanup...")
