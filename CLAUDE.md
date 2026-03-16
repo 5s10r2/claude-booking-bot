@@ -169,6 +169,7 @@ data/transit_lines.json (81) — Metro/transit lines for Mumbai, Bangalore, Delh
 ```
 stress_test_broker.py    (600+) — 20-scenario broker intelligence regression suite | Scenario@62, Turn@54, run_scenario@537. Block A: single-turn, Block B: objection handling, etc. Args: --scenario N, --from N
 test_dynamic_skills.py   (798)  — 8-scenario dynamic-skill E2E test | run_all@299, check@181, extract_property_names@119. Uses real OxOtel pg_ids; skill verification via /admin/analytics delta (snapshot before/after). Results: 4 PASS / 4 WARN / 0 FAIL
+test_semantic_kb.py      (200+) — 9-step semantic KB end-to-end test | Uploads mock pricing doc → searches Kurla → asserts bot cites exact KB figures (₹9,500 / 10% / 15%). Uses OXOTEL_ACCOUNT_VALUES with full pg_ids list (required for search to return results). Results: 9/9 PASS
 ```
 
 ## Frontend File Map (eazypg-chat/)
@@ -335,6 +336,11 @@ Phase C: `core/claude.py` checks `cancel_requested` between tool-call iterations
 Config: `WA_DEBOUNCE_SECONDS=2.0`, `WAMID_DEDUP_TTL=86400`, `WA_QUEUE_TTL=300`, `WA_PROCESSING_TTL=120` (all in `config.py`).
 Frontend (Phase A): `eazypg-chat/src/stream.js` uses AbortController + requestCounter for interrupt-on-send; Stop button added to `index.html`.
 
+### New Redis Keys (Semantic KB — Property Documents)
+```
+{uid}:search_property_ids   JSON list, 10min TTL — pg_ids of properties returned by last search (set by search.py after set_property_info_map). Read by broker_agent._inject_doc_context to scope KB retrieval to properties the user has just seen. ⚠️ CRITICAL: this key was defined but NOT called from search.py until fix aeae81b (March 2026). Without it, _inject_doc_context bails early and KB docs are never injected.
+```
+
 ### New Postgres Tables
 ```
 property_documents — id, property_id, filename, file_type, content_text, size_bytes, category, embedding, uploaded_at
@@ -342,7 +348,7 @@ property_documents — id, property_id, filename, file_type, content_text, size_
                      category: pricing_availability | living_experience | location_area | brand_story
                      embedding: vector(256) — nomic-embed-text-v1.5 Matryoshka, populated on upload
                      KB injection: 3-tier fallback: semantic search → category-filtered dump → full dump
-                     Feature flag: SEMANTIC_KB_ENABLED (default false)
+                     Feature flag: SEMANTIC_KB_ENABLED (default false; true requires NOMIC_API_KEY)
 
 error_events         — id, user_id, brand_hash, error_type, error_source, error_message, context (JSONB), created_at
                      Created on startup via pg.create_error_events_table()

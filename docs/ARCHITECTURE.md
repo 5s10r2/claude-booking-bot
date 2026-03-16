@@ -96,7 +96,7 @@ All keys use `{uid}` (user_id) prefix unless noted. Redis instance is Render-man
 | `{uid}:property_template` | string (JSON array) | none | Top 5 properties for WA carousel |
 | `{uid}:property_images_id` | string (JSON array) | none | WA media IDs for property images |
 | `{uid}:image_urls` | string (JSON array) | none | Image URLs before WA upload |
-| `{uid}:search_property_ids` | string (JSON array) | 10min | Recent search result IDs for deduplication |
+| `{uid}:search_property_ids` | string (JSON array) | 10min | pg_ids of properties returned by last search — set by `search.py` after `set_property_info_map`, read by `broker_agent._inject_doc_context` to scope KB document retrieval to what the user has just seen. **Bug history:** this key was defined but never called until fix `aeae81b` (March 2026); without it, KB docs were silently never injected. |
 | `search_cache:{md5}` | string (JSON) | 15min | Rentok search API response cache (keyed by payload hash) |
 
 ### Payment & Booking
@@ -186,6 +186,72 @@ All analytics functions write to BOTH global keys (above) and brand-scoped keys 
 
 ---
 
+## Semantic Knowledge Base (KB) Architecture
+
+Broker agent injects property-specific documents into its prompt via a 3-tier retrieval chain. Controlled by feature flag `SEMANTIC_KB_ENABLED` (default `false`).
+
+### Data Flow
+
+```
+Admin uploads file → POST /admin/properties/{prop_id}/documents
+  → postgres.py: store content_text + metadata in property_documents table
+  → utils/embeddings.py: embed_documents(content_text) via Nomic Atlas API
+  → Store vector(256) in property_documents.embedding column (pgvector)
+
+Per broker turn:
+  broker_agent.py: _inject_doc_context(uid, user_message)
+    → get_property_id_for_search(uid) → Redis {uid}:search_property_ids (10min TTL)
+    │   ⚠️ Returns [] if search.py didn't call set_property_id_for_search after last search
+    │   (this was a silent bug until fix aeae81b — fix added call to set_property_id_for_search
+    │   in search.py after set_property_info_map)
+    │
+    → Tier 1 (if SEMANTIC_KB_ENABLED + NOMIC_API_KEY available):
+    │   embed_query(user_message) → Nomic Atlas API
+    │   pgvector cosine similarity search → top-k docs for prop_ids
+    │
+    → Tier 2 (fallback if semantic fails or disabled):
+    │   get_property_documents_text(prop_ids, category=detected_category)
+    │   Category detected from user_message keywords:
+    │     - "price/rent/discount/fee" → pricing_availability
+    │     - "area/location/nearby/transport" → location_area
+    │     - "rules/food/wifi/amenities" → living_experience
+    │     - otherwise → brand_story
+    │
+    → Tier 3 (fallback if category returns empty):
+    │   get_property_documents_text(prop_ids) — all categories, no filter
+    │
+    → Inject into broker prompt:
+        [KNOWLEDGE BASE — PROPERTY DOCUMENTS]
+        {formatted content, max 8000 chars}
+        [END KNOWLEDGE BASE]
+```
+
+### Embedding Model
+
+| Attribute | Value |
+|-----------|-------|
+| Provider | Nomic Atlas API (`api.nomic.ai`) |
+| Model | `nomic-embed-text-v1.5` |
+| Dimensions | 256 (Matryoshka — 256 of 768) |
+| Task types | `search_document` (upload), `search_query` (retrieval) |
+| Failure mode | All errors → `None` (callers fall back to text-only retrieval) |
+| File | `utils/embeddings.py` — raw `httpx`, no SDK dependency |
+
+### Document Categories
+
+| Category | When Used | Typical Content |
+|----------|-----------|-----------------|
+| `pricing_availability` | Pricing/discount questions | Rent tiers, discounts, deposits, availability |
+| `living_experience` | Amenity/lifestyle questions | Meals, WiFi, rules, community events |
+| `location_area` | Location/commute questions | Nearby landmarks, transport, area guide |
+| `brand_story` | Brand/general questions | Brand overview, FAQs, customer support |
+
+### pg_id vs p_id — KB Key Distinction
+
+KB documents are stored and retrieved by **Firebase `pg_id`** (e.g., `UaDCGP3dzzZRgVIzBDgXb5ry5ng2`), which is the `p_pg_id` field in search results. The Rentok UUID (`p_id`) is used for booking/scheduling endpoints only. Passing `p_id` (UUID) to property document lookup will find nothing — always use `p_pg_id`.
+
+---
+
 ## Rentok API Catalog
 
 Base URL: `https://apiv2.rentok.com` (configurable via `RENTOK_API_BASE_URL`)
@@ -194,7 +260,7 @@ Base URL: `https://apiv2.rentok.com` (configurable via `RENTOK_API_BASE_URL`)
 | Method | Endpoint | Key Params | File | Purpose |
 |--------|----------|------------|------|---------|
 | POST | `/property/getLatLongProperty` | `{"address": str}` | search.py, landmarks.py (via utils/geo.py) | Geocode location to lat/lng |
-| POST | `/property/getPropertyDetailsAroundLatLong` | `coords, radius, rent_ends_to, pg_ids, unit_types_available?, pg_available_for?, sharing_type_enabled?` | search.py:_call_search_api | Search properties by geo + filters |
+| POST | `/property/getPropertyDetailsAroundLatLong` | `coords, radius, rent_ends_to, pg_ids, unit_types_available?, pg_available_for?, sharing_type_enabled?` | search.py:_call_search_api | Search properties by geo + filters. ⚠️ `pg_available_for` only matches explicitly gender-tagged properties (returns 0 for "Any"). ⚠️ `unit_types_available` returns 0 for tested values. ⚠️ null-coordinate properties appear with large radius (≥50km). Omit optional filters when not strictly needed. |
 | POST | `/property/property-details-bots` | `{"property_id": str}` | property_details.py | Full property details (amenities, rules, FAQs) |
 | POST | `/bookingBot/fetchPropertyImages` | `{"pg_id": str, "pg_number": str}` | images.py, search.py | Fetch property images |
 | POST | `/bookingBot/fetch-all-properties` | `{"pg_ids": list}` | query_properties.py | All properties for a brand |

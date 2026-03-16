@@ -109,8 +109,8 @@ The primary discovery endpoint. Searches properties within a radius of given coo
 | `pg_ids` | `string[]` | ✅ | `["l5zf3ckOnRQV...", "egu5Hm..."]` | Brand's whitelabel pg_ids. Must be non-empty or API returns nothing. |
 | `rent_ends_to` | `int` | ✅ | `25000` | Maximum rent filter (₹). Send `10000000` for no upper limit. |
 | `rent_starts_from` | `int` | ❌ | `8000` | Minimum rent filter (₹). Omit if no lower bound. |
-| `unit_types_available` | `string` | ❌ | `"Private Room"` | Filter by room type. |
-| `pg_available_for` | `string` | ❌ | `"All Boys"` | Values: `"All Boys"`, `"All Girls"`. Omit for co-living/any. |
+| `unit_types_available` | `string` | ❌ | `"Private Room"` | Filter by room type. ⚠️ **Returns 0 results for all tested values** — do not pass unless confirmed server-side values for the RentOK tenant are known. |
+| `pg_available_for` | `string` | ❌ | `"All Boys"` | Values: `"All Boys"`, `"All Girls"`. Omit for co-living/any. ⚠️ **Only matches explicitly gender-labeled properties** — returns 0 for properties tagged "Any". |
 | `sharing_type_enabled` | `string` | ❌ | `"Single"` | Filter by sharing preference. |
 
 **Response Shape**
@@ -1038,6 +1038,34 @@ When required fields are missing, the API returns a Zod validation error shape w
 
 ### No Pagination
 `POST /property/getPropertyDetailsAroundLatLong` and `POST /bookingBot/fetch-all-properties` return all results in a single response. There is no pagination cursor or limit parameter.
+
+### Search Filter Quirks (Live-Tested March 2026)
+
+Three `POST /property/getPropertyDetailsAroundLatLong` filters have been confirmed to produce **0 results** under common conditions. Avoid them unless the use case demands explicit filtering, or test carefully per RentOK tenant.
+
+#### `pg_available_for` — Gender Filter Returns 0 for "Any" Properties
+Passing `"pg_available_for": "All Girls"` or `"pg_available_for": "All Boys"` returns **zero results** for properties whose availability is set to `"Any"` in RentOK (co-living / mixed). The filter only matches properties explicitly tagged with the exact gender label. Properties tagged `"Any"` are excluded, even if they accept that gender.
+
+**Implication:** A search with `pg_available_for: "All Girls"` will silently omit properties open to all genders. For multi-property brands that include co-living stock, this filter can return 0 results even when availability exists.
+
+**Bot behaviour:** Omit this filter from the API call when the user has not explicitly stated a gender preference. Let the bot handle gender preference as a text-layer suggestion rather than an API filter.
+
+#### `unit_types_available` — Room Type Filter Returns 0 Results
+Passing `"unit_types_available": "double sharing"` (or similar) returns **0 results** for all tested OxOtel properties. The API appears to expect a specific format or value set that differs from common strings. The exact accepted values are not documented by RentOK.
+
+**Implication:** Do not pass `unit_types_available` unless the correct server-side value strings are confirmed for the tenant. Use the bot's own scoring/filtering post-API call to apply room-type preferences.
+
+#### Properties with `null` Coordinates Still Appear in Results
+Some properties have `p_lat: null, p_long: null` in the RentOK database but **still appear in search results** when the search radius is large enough. A 100,000m radius from a central Mumbai point (e.g., 19.1136, 72.8697) returns all OxOtel properties including coordinate-less ones.
+
+**Implication:** A null lat/lng does not mean a property is excluded from search — it depends on the radius. Bot tests should use a large radius (≥50,000m) when trying to retrieve all brand properties regardless of their geocoding status. Conversely, location-specific searches with smaller radii will naturally exclude these properties.
+
+### `pg_ids` Is Mandatory — Not Optional
+The `pg_ids` array (whitelabel property group IDs) **must be non-empty**. Passing an empty array or omitting the field returns zero results from `getPropertyDetailsAroundLatLong` and `fetch-all-properties`.
+
+These IDs are brand-specific Firebase UIDs. They are **not** the same as the Rentok UUID (`p_id`) or the room-level `eazypg_id`. The bot receives them via `account_values.pg_ids` from the frontend (web widget) or WhatsApp webhook payload. For web users, the frontend must pass `pg_ids` explicitly in the chat request body — passing only a brand token UUID without `pg_ids` results in empty search results.
+
+**Critical:** If `account_values.pg_ids` is missing or empty when the bot tries to search, `get_whitelabel_pg_ids()` returns `[]` → search tool logs a warning and returns `[]` → bot apologises with "no properties found." This can silently masquerade as a location issue.
 
 ### Rate Limiting
 No rate limiting has been observed from the RentOK API. The client-side rate limits (6/min per user, 30/hr per user) are enforced by the bot's own `core/rate_limiter.py`.

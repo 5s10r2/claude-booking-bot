@@ -8,7 +8,7 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat&logo=postgresql&logoColor=white)
 ![Render](https://img.shields.io/badge/Render-46E3B7?style=flat&logo=render&logoColor=white)
 
-**Last updated**: 2026-03-15
+**Last updated**: 2026-03-16
 
 ---
 
@@ -41,8 +41,8 @@ A full-stack conversational AI assistant that helps users find, compare, and boo
 - **Web Intelligence** — Live web search for area insights and market data
 - **Property Maps** — Leaflet maps with property pins, commute estimation via OSRM
 - **Lead Scoring** — Automated lead qualification based on engagement signals
-- **Property Documents KB** — Upload PDFs/XLSX/CSV/TXT per property; content injected into broker prompt
-- **Per-Brand Feature Flags** — KYC_ENABLED, PAYMENT_REQUIRED, DYNAMIC_SKILLS_ENABLED — toggleable per brand at runtime
+- **Semantic Knowledge Base** — Upload PDFs/XLSX/CSV/TXT per property; 3-tier retrieval (semantic Nomic embed → category-filtered dump → full dump) injects relevant KB content into broker prompt per turn; powered by `nomic-embed-text-v1.5` 256-dim Matryoshka embeddings stored in `pgvector`
+- **Per-Brand Feature Flags** — KYC_ENABLED, PAYMENT_REQUIRED, DYNAMIC_SKILLS_ENABLED, SEMANTIC_KB_ENABLED — toggleable per brand at runtime
 
 ---
 
@@ -218,7 +218,8 @@ claude-booking-bot/
 │   ├── retry.py             # Async retry decorator (2 retries, exponential backoff)
 │   ├── properties.py        # Shared property lookup (exact + substring match)
 │   ├── api.py               # Rentok API response validation
-│   └── property_docs.py     # KB document formatting for prompt injection
+│   ├── property_docs.py     # KB document formatting for prompt injection
+│   └── embeddings.py        # Nomic Atlas embedding client (embed_documents, embed_query; 256-dim Matryoshka)
 ├── data/
 │   └── transit_lines.json   # Metro/transit lines (Mumbai/Bangalore/Delhi/Pune)
 ├── docs/                    # Documentation
@@ -231,6 +232,7 @@ claude-booking-bot/
     ├── stress_test_broker_prod.py # Same, against production URL
     ├── test_comprehensive.py      # 16-tool comprehensive test
     ├── test_dynamic_skills.py     # 8-scenario dynamic skill E2E
+    ├── test_semantic_kb.py        # 9-step semantic KB end-to-end (upload → search → inject → cite)
     ├── test_fixed_tools.py        # Fixed tools regression
     └── test_full_integration.py   # Full integration suite
 ```
@@ -286,6 +288,8 @@ uvicorn main:app --reload --port 8000
 | `KYC_ENABLED` | No | `false` | Enable Aadhaar verification |
 | `PAYMENT_REQUIRED` | No | `false` | Require payment before reservation (false = skip payment step) |
 | `DYNAMIC_SKILLS_ENABLED` | No | `true` | Dynamic skill system (false = legacy monolithic prompt) |
+| `SEMANTIC_KB_ENABLED` | No | `false` | Enable semantic KB retrieval (pgvector + Nomic embeddings; false = plain text dump only) |
+| `NOMIC_API_KEY` | No | — | Nomic Atlas API key for semantic embeddings (required when SEMANTIC_KB_ENABLED=true) |
 | `WEB_SEARCH_MAX_PER_CONVERSATION` | No | `3` | Max web search calls per conversation |
 | `WA_DEBOUNCE_SECONDS` | No | `2.0` | WhatsApp multi-turn queue debounce |
 | `WAMID_DEDUP_TTL` | No | `86400` | WhatsApp message dedup TTL (seconds) |
