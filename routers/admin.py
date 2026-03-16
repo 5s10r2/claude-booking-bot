@@ -758,7 +758,7 @@ async def admin_get_flags(brand_hash: str = Depends(require_admin_brand_key)):
 
 
 # Mutable flags that can be toggled per-brand (persisted in Redis).
-_MUTABLE_FLAGS = {"DYNAMIC_SKILLS_ENABLED", "KYC_ENABLED", "PAYMENT_REQUIRED"}
+_MUTABLE_FLAGS = {"DYNAMIC_SKILLS_ENABLED", "KYC_ENABLED", "PAYMENT_REQUIRED", "SEMANTIC_KB_ENABLED"}
 
 
 @router.post("/admin/flags")
