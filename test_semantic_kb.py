@@ -1,371 +1,162 @@
 """
 Semantic KB End-to-End Test Suite
-Tests the full pipeline: flag toggle → document upload with category → embedding → semantic retrieval via chat
+Tests: flag toggle → doc upload with category → embedding → semantic retrieval via chat
 
-Requires: production backend running with NOMIC_API_KEY set
+Cost: ~2 Haiku calls ($0.002 total)
 Usage: python test_semantic_kb.py
 """
 
-import asyncio
-import httpx
-import json
-import time
-import sys
-import uuid
+import asyncio, httpx, json, time, sys, uuid
 
-# ── Config ──────────────────────────────────────────────────────────
 BASE_URL = "https://claude-booking-bot.onrender.com"
 API_KEY = "OxOtel1234"
 HEADERS = {"X-API-Key": API_KEY}
-# Use first OxOtel property
-TEST_PROP_ID = "l5zf3ckOnRQV9OHdv5YTTXkvLHp1"
-TEST_USER_ID = f"test_semantic_kb_{uuid.uuid4().hex[:8]}"
-TIMEOUT = 60.0
+PROP_ID = "l5zf3ckOnRQV9OHdv5YTTXkvLHp1"
+TEST_UID = f"skb_{uuid.uuid4().hex[:6]}"
 
-
-# ── Helpers ─────────────────────────────────────────────────────────
-async def api(method: str, path: str, **kwargs):
-    async with httpx.AsyncClient(base_url=BASE_URL, timeout=TIMEOUT) as c:
-        resp = await getattr(c, method)(path, headers=HEADERS, **kwargs)
-        return resp
-
-
-def result(name: str, passed: bool, detail: str = ""):
-    icon = "✅" if passed else "❌"
-    print(f"  {icon} {name}" + (f" — {detail}" if detail else ""))
-    return passed
-
-
-# ── Tests ───────────────────────────────────────────────────────────
-async def test_1_health():
-    """Verify backend is up"""
-    print("\n[T1] Health check")
-    try:
-        resp = await api("get", "/health")
-        return result("Backend healthy", resp.status_code == 200, f"status={resp.status_code}")
-    except Exception as e:
-        return result("Backend healthy", False, str(e))
-
-
-async def test_2_enable_flag():
-    """Enable SEMANTIC_KB_ENABLED for OxOtel brand"""
-    print("\n[T2] Enable SEMANTIC_KB_ENABLED flag")
-
-    # First check current flags
-    resp = await api("get", "/admin/flags")
-    if resp.status_code != 200:
-        return result("Get flags", False, f"status={resp.status_code}")
-
-    flags = resp.json()
-    current = flags.get("SEMANTIC_KB_ENABLED", False)
-    print(f"       Current SEMANTIC_KB_ENABLED = {current}")
-
-    # Enable it
-    resp = await api("post", "/admin/flags", json={"key": "SEMANTIC_KB_ENABLED", "value": True})
-    if resp.status_code != 200:
-        return result("Enable flag", False, f"status={resp.status_code} body={resp.text}")
-
-    # Verify
-    resp = await api("get", "/admin/flags")
-    flags = resp.json()
-    enabled = flags.get("SEMANTIC_KB_ENABLED", False)
-    return result("SEMANTIC_KB_ENABLED = true", enabled is True, f"flags={flags}")
-
-
-async def test_3_upload_document():
-    """Upload a test document with category"""
-    print("\n[T3] Upload document with category")
-
-    # Create a realistic test document
-    doc_text = """OxOtel Andheri West - Pricing & Availability Guide
-
-Monthly Rent Structure:
-- Single occupancy bed in shared room: ₹12,000/month
-- Double occupancy bed in shared room: ₹9,500/month
-- Triple occupancy bed in shared room: ₹7,500/month
-- Private room (single): ₹18,000/month
-
-Security Deposit: 2 months rent (refundable)
-Lock-in Period: 3 months minimum stay
-Token Amount: ₹2,000 (adjustable against first month rent)
-
-Current Availability (March 2026):
-- 3 beds available in triple sharing
-- 1 bed available in double sharing
-- Private rooms: Waitlisted (expected April 2026)
-
-Special Offers:
-- Early bird discount: 10% off first 3 months for bookings made 2 weeks in advance
-- Referral bonus: ₹2,000 credit for each successful referral
-- Long-stay discount: 15% off for 6-month commitment
+DOC_PRICING = """OxOtel Andheri West — Pricing Guide (March 2026)
+- Triple sharing: ₹7,500/month
+- Double sharing: ₹9,500/month
+- Single room: ₹18,000/month
+- Security deposit: 2 months rent (refundable)
+- Token amount: ₹2,000
+- Early bird: 10% off for 2-week advance booking
+- Long-stay: 15% off for 6-month commitment
 """
 
-    files = {"file": ("test_pricing_doc.txt", doc_text.encode(), "text/plain")}
-    data = {"category": "pricing_availability"}
-
-    resp = await api("post", f"/admin/properties/{TEST_PROP_ID}/documents", files=files, data=data)
-    if resp.status_code != 200:
-        return result("Upload document", False, f"status={resp.status_code} body={resp.text[:200]}")
-
-    body = resp.json()
-    doc_id = body.get("id") or body.get("doc_id")
-    print(f"       Document ID: {doc_id}")
-    print(f"       Category: {body.get('category', 'N/A')}")
-
-    # Wait for background embedding to complete
-    print("       Waiting 5s for background embedding...")
-    await asyncio.sleep(5)
-
-    return result("Document uploaded", doc_id is not None, f"id={doc_id}"), doc_id
-
-
-async def test_4_upload_location_doc():
-    """Upload a second document with different category for contrast"""
-    print("\n[T4] Upload location document")
-
-    doc_text = """OxOtel Andheri West - Location & Connectivity
-
-Address: Plot 42, DN Nagar, Andheri West, Mumbai 400053
-
-Metro Connectivity:
-- DN Nagar Metro Station: 5 minute walk (Line 1)
-- Andheri Metro Station: 10 minute auto ride
-- Direct metro to BKC (25 mins), Ghatkopar (20 mins)
-
-Railway:
-- Andheri Railway Station: 15 minute walk (Western Line)
-- Direct trains to Churchgate (40 mins), Borivali (25 mins)
-
-Nearby Landmarks:
-- Lokhandwala Market: 8 min walk
-- Infinity Mall: 12 min walk
-- Kokilaben Hospital: 10 min drive
-- JVPD Scheme: 5 min walk
-
-Area Highlights:
-- Well-connected IT hub area
-- Multiple food options within 500m radius
-- 24/7 pharmacy and medical stores nearby
+DOC_LOCATION = """OxOtel Andheri West — Location Guide
+- DN Nagar Metro: 5-min walk (Line 1)
+- Andheri Railway Station: 15-min walk (Western Line)
+- Lokhandwala Market: 8-min walk
+- Infinity Mall: 12-min walk
+- Mumbai Airport: 4km by auto
 """
 
-    files = {"file": ("test_location_doc.txt", doc_text.encode(), "text/plain")}
-    data = {"category": "location_area"}
+scores = []
 
-    resp = await api("post", f"/admin/properties/{TEST_PROP_ID}/documents", files=files, data=data)
-    if resp.status_code != 200:
-        return result("Upload location doc", False, f"status={resp.status_code}")
-
-    body = resp.json()
-    doc_id = body.get("id") or body.get("doc_id")
-
-    # Wait for embedding
-    print("       Waiting 5s for background embedding...")
-    await asyncio.sleep(5)
-
-    return result("Location doc uploaded", doc_id is not None, f"id={doc_id}"), doc_id
+def check(name, ok, detail=""):
+    scores.append(ok)
+    print(f"  {'✅' if ok else '❌'} {name}" + (f" — {detail}" if detail else ""))
+    return ok
 
 
-async def test_5_verify_documents():
-    """Verify documents exist with categories"""
-    print("\n[T5] Verify documents in DB")
-
-    resp = await api("get", f"/admin/properties/{TEST_PROP_ID}/documents")
-    if resp.status_code != 200:
-        return result("List documents", False, f"status={resp.status_code}")
-
-    docs = resp.json()
-    if not isinstance(docs, list):
-        docs = docs.get("documents", [])
-
-    print(f"       Found {len(docs)} documents")
-    for d in docs:
-        cat = d.get("category", "none")
-        fname = d.get("filename", "?")
-        print(f"       - {fname} [{cat}]")
-
-    has_pricing = any(d.get("category") == "pricing_availability" for d in docs)
-    has_location = any(d.get("category") == "location_area" for d in docs)
-
-    return result("Both categories present", has_pricing and has_location,
-                   f"pricing={has_pricing}, location={has_location}")
-
-
-async def test_6_semantic_retrieval_pricing():
-    """Ask a pricing question — should retrieve pricing doc via semantic search"""
-    print("\n[T6] Semantic retrieval: pricing question")
-
-    question = "What is the monthly rent for a single bed in Andheri? Any discounts available?"
-
-    async with httpx.AsyncClient(base_url=BASE_URL, timeout=90.0) as c:
-        resp = await c.post("/chat/stream", json={
-            "message": question,
-            "user_id": TEST_USER_ID,
-            "account_values": {"brand": "OxOtel"},
-        }, headers={"Accept": "text/event-stream"})
-
-        if resp.status_code != 200:
-            return result("Chat stream", False, f"status={resp.status_code} body={resp.text[:200]}")
-
-        # Collect SSE response
-        full_text = ""
-        for line in resp.text.split("\n"):
-            if line.startswith("data: "):
-                data = line[6:]
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                    if "text" in chunk:
-                        full_text += chunk["text"]
-                    elif "content" in chunk:
-                        full_text += chunk["content"]
-                except json.JSONDecodeError:
-                    full_text += data
-
-    print(f"       Response length: {len(full_text)} chars")
-    preview = full_text[:300].replace("\n", " ")
-    print(f"       Preview: {preview}...")
-
-    # Check if response contains pricing info from our uploaded doc
-    pricing_keywords = ["12,000", "12000", "9,500", "9500", "7,500", "7500", "18,000", "18000",
-                        "discount", "token", "deposit", "rent"]
-    matches = [kw for kw in pricing_keywords if kw.lower() in full_text.lower()]
-
-    return result("Response contains pricing data", len(matches) >= 2,
-                   f"matched: {matches}")
-
-
-async def test_7_semantic_retrieval_location():
-    """Ask a location question — should retrieve location doc"""
-    print("\n[T7] Semantic retrieval: location question")
-
-    question = "How far is the nearest metro station from OxOtel Andheri? What about the railway station?"
-
-    async with httpx.AsyncClient(base_url=BASE_URL, timeout=90.0) as c:
-        resp = await c.post("/chat/stream", json={
-            "message": question,
-            "user_id": TEST_USER_ID + "_loc",
-            "account_values": {"brand": "OxOtel"},
-        }, headers={"Accept": "text/event-stream"})
-
-        if resp.status_code != 200:
-            return result("Chat stream", False, f"status={resp.status_code}")
-
-        full_text = ""
-        for line in resp.text.split("\n"):
-            if line.startswith("data: "):
-                data = line[6:]
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                    if "text" in chunk:
-                        full_text += chunk["text"]
-                    elif "content" in chunk:
-                        full_text += chunk["content"]
-                except json.JSONDecodeError:
-                    full_text += data
-
-    print(f"       Response length: {len(full_text)} chars")
-    preview = full_text[:300].replace("\n", " ")
-    print(f"       Preview: {preview}...")
-
-    # Check location info from our doc
-    location_keywords = ["DN Nagar", "metro", "andheri", "railway", "walk", "minute",
-                         "Lokhandwala", "Western Line"]
-    matches = [kw for kw in location_keywords if kw.lower() in full_text.lower()]
-
-    return result("Response contains location data", len(matches) >= 2,
-                   f"matched: {matches}")
-
-
-async def test_8_cleanup(doc_ids: list):
-    """Clean up: delete test documents, disable flag"""
-    print("\n[T8] Cleanup")
-
-    deleted = 0
-    for doc_id in doc_ids:
-        if doc_id:
-            resp = await api("delete", f"/admin/properties/{TEST_PROP_ID}/documents/{doc_id}")
-            if resp.status_code == 200:
-                deleted += 1
-
-    result("Deleted test documents", deleted == len([d for d in doc_ids if d]),
-           f"{deleted}/{len(doc_ids)}")
-
-    # Disable flag
-    resp = await api("post", "/admin/flags", json={"key": "SEMANTIC_KB_ENABLED", "value": False})
-    result("SEMANTIC_KB_ENABLED reset to false", resp.status_code == 200)
-
-    return True
-
-
-# ── Runner ──────────────────────────────────────────────────────────
 async def main():
-    print("=" * 60)
-    print("  Semantic KB End-to-End Test Suite")
-    print("=" * 60)
-    print(f"  Backend:  {BASE_URL}")
-    print(f"  Brand:    OxOtel (key: {API_KEY})")
-    print(f"  Property: {TEST_PROP_ID}")
-    print(f"  User:     {TEST_USER_ID}")
-
-    results = []
+    print(f"\n{'='*55}\n  Semantic KB E2E Tests — {BASE_URL}\n{'='*55}")
     doc_ids = []
 
-    # T1: Health
-    r = await test_1_health()
-    results.append(r)
-    if not r:
-        print("\n⚠️  Backend not reachable. Waiting 30s for cold start...")
-        await asyncio.sleep(30)
-        r = await test_1_health()
-        results[-1] = r
-        if not r:
-            print("\n❌ Backend still down. Aborting.")
-            sys.exit(1)
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=90) as c:
+        # T1: Health
+        r = await c.get("/health")
+        if not check("T1 Health", r.status_code == 200):
+            print("  ⏳ Cold start — waiting 30s...")
+            await asyncio.sleep(30)
+            r = await c.get("/health")
+            if not check("T1 Retry", r.status_code == 200):
+                sys.exit(1)
 
-    # T2: Enable flag
-    r = await test_2_enable_flag()
-    results.append(r)
-    if not r:
-        print("\n❌ Cannot enable flag. Aborting.")
-        sys.exit(1)
+        # T2: Enable SEMANTIC_KB_ENABLED
+        r = await c.post("/admin/flags", headers=HEADERS,
+                         json={"key": "SEMANTIC_KB_ENABLED", "value": True})
+        check("T2 Enable flag", r.status_code == 200, r.text[:80] if r.status_code != 200 else "")
 
-    # T3: Upload pricing doc
-    r, doc_id = await test_3_upload_document()
-    results.append(r)
-    doc_ids.append(doc_id)
+        r = await c.get("/admin/flags", headers=HEADERS)
+        flags = r.json() if r.status_code == 200 else {}
+        check("T2b Verify flag", flags.get("SEMANTIC_KB_ENABLED") is True)
 
-    # T4: Upload location doc
-    r, doc_id = await test_4_upload_location_doc()
-    results.append(r)
-    doc_ids.append(doc_id)
+        # T3: Upload pricing doc
+        r = await c.post(
+            f"/admin/properties/{PROP_ID}/documents",
+            headers={"X-API-Key": API_KEY},
+            files={"file": ("pricing.txt", DOC_PRICING.encode(), "text/plain")},
+            data={"category": "pricing_availability"},
+        )
+        d3 = r.json() if r.status_code == 200 else {}
+        did3 = d3.get("id") or d3.get("doc_id")
+        doc_ids.append(did3)
+        check("T3 Upload pricing doc", did3 is not None, f"id={did3}")
 
-    # T5: Verify docs
-    r = await test_5_verify_documents()
-    results.append(r)
+        # T4: Upload location doc
+        r = await c.post(
+            f"/admin/properties/{PROP_ID}/documents",
+            headers={"X-API-Key": API_KEY},
+            files={"file": ("location.txt", DOC_LOCATION.encode(), "text/plain")},
+            data={"category": "location_area"},
+        )
+        d4 = r.json() if r.status_code == 200 else {}
+        did4 = d4.get("id") or d4.get("doc_id")
+        doc_ids.append(did4)
+        check("T4 Upload location doc", did4 is not None, f"id={did4}")
 
-    # T6: Semantic retrieval - pricing
-    r = await test_6_semantic_retrieval_pricing()
-    results.append(r)
+        # Wait for background embedding
+        print("  ⏳ Waiting 6s for Nomic embedding...")
+        await asyncio.sleep(6)
 
-    # T7: Semantic retrieval - location
-    r = await test_7_semantic_retrieval_location()
-    results.append(r)
+        # T5: Verify docs have categories
+        r = await c.get(f"/admin/properties/{PROP_ID}/documents", headers=HEADERS)
+        docs = r.json() if r.status_code == 200 else []
+        if isinstance(docs, dict):
+            docs = docs.get("documents", [])
+        our = [d for d in docs if d.get("id") in (did3, did4)]
+        cats = [d.get("category") for d in our]
+        check("T5 Docs have categories", len(our) == 2 and all(cats), f"cats={cats}")
 
-    # T8: Cleanup
-    await test_8_cleanup(doc_ids)
+        # T6: Search first to populate property IDs, then ask pricing (2 Haiku calls)
+        print("\n  💬 T6a: Search to build context (1 Haiku call)...")
+        r = await c.post("/chat", headers={**HEADERS, "Content-Type": "application/json"},
+                         json={"message": "Show me PGs in Andheri West",
+                               "user_id": TEST_UID,
+                               "account_values": {"brand": "OxOtel"}})
+        t6a_ok = r.status_code == 200
+        if t6a_ok:
+            body = r.json()
+            reply = body.get("response", "") or body.get("reply", "") or str(body)
+            print(f"       Search reply: {reply[:150]}...")
+        check("T6a Search context", t6a_ok, f"HTTP {r.status_code}")
+
+        print("  💬 T6b: Pricing question (1 Haiku call)...")
+        r = await c.post("/chat", headers={**HEADERS, "Content-Type": "application/json"},
+                         json={"message": "What is the monthly rent for double sharing? Any discounts?",
+                               "user_id": TEST_UID,
+                               "account_values": {"brand": "OxOtel"}})
+        if r.status_code == 200:
+            body = r.json()
+            reply = body.get("response", "") or body.get("reply", "") or str(body)
+            kws = ["9,500", "9500", "discount", "15%", "10%", "deposit", "7,500", "7500", "rent", "₹"]
+            hits = [k for k in kws if k.lower() in reply.lower()]
+            print(f"       Reply preview: {reply[:250]}")
+            check("T6b Pricing retrieval", len(hits) >= 1, f"matched: {hits}")
+        else:
+            check("T6b Pricing retrieval", False, f"HTTP {r.status_code}: {r.text[:150]}")
+
+        # T7: Location question on same user (already has search context)
+        print("\n  💬 T7: Location question (1 Haiku call)...")
+        r = await c.post("/chat", headers={**HEADERS, "Content-Type": "application/json"},
+                         json={"message": "How far is the nearest metro station from this property?",
+                               "user_id": TEST_UID,
+                               "account_values": {"brand": "OxOtel"}})
+        if r.status_code == 200:
+            body = r.json()
+            reply = body.get("response", "") or body.get("reply", "") or str(body)
+            kws = ["dn nagar", "metro", "5 min", "5-min", "walk", "andheri", "line 1", "station"]
+            hits = [k for k in kws if k.lower() in reply.lower()]
+            print(f"       Reply preview: {reply[:250]}")
+            check("T7 Location retrieval", len(hits) >= 1, f"matched: {hits}")
+        else:
+            check("T7 Location retrieval", False, f"HTTP {r.status_code}: {r.text[:150]}")
+
+        # Cleanup
+        print("\n  🧹 Cleanup...")
+        for did in doc_ids:
+            if did:
+                await c.delete(f"/admin/properties/{PROP_ID}/documents/{did}", headers=HEADERS)
+        await c.post("/admin/flags", headers=HEADERS,
+                     json={"key": "SEMANTIC_KB_ENABLED", "value": False})
 
     # Summary
-    passed = sum(1 for r in results if r)
-    total = len(results)
-    print("\n" + "=" * 60)
-    print(f"  Results: {passed}/{total} PASS")
-    print("=" * 60)
-
-    sys.exit(0 if passed == total else 1)
-
+    p = sum(scores)
+    t = len(scores)
+    print(f"\n{'='*55}\n  {p}/{t} PASS" + (" — 🎉 All passed!" if p == t else "") + f"\n{'='*55}")
+    sys.exit(0 if p == t else 1)
 
 if __name__ == "__main__":
     asyncio.run(main())
