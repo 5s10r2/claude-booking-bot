@@ -869,30 +869,33 @@ async def admin_broadcast(req: BroadcastRequest, brand_hash: str = Depends(requi
 
 @router.get("/admin/properties")
 async def admin_list_properties(brand_hash: str = Depends(require_admin_brand_key)):
-    """Return properties belonging to this brand (from Redis property_info_map cache)."""
-    # Determine which pg_ids belong to this brand
-    brand_cfg = get_brand_config_by_hash(brand_hash) or {}
-    brand_pg_ids = set(brand_cfg.get("pg_ids", []))
+    """Return properties belonging to this brand.
 
+    Always returns all brand pg_ids as stubs; enriches with names/areas from
+    the Redis property_info_map cache when available (populated by user searches).
+    """
+    brand_cfg = get_brand_config_by_hash(brand_hash) or {}
+    brand_pg_ids: list[str] = brand_cfg.get("pg_ids", [])
+
+    # Try to enrich from the Rentok property cache
+    prop_map: dict = {}
     try:
         raw = _r().get("property_info_map")
-        if not raw:
-            return {"properties": []}
-        prop_map = _json_module.loads(raw)
-        props = []
-        for pid, info in prop_map.items():
-            # Only show properties belonging to this brand
-            if brand_pg_ids and pid not in brand_pg_ids:
-                continue
-            props.append({
-                "id":   pid,
-                "name": info.get("pg_name") or info.get("name") or pid,
-                "area": info.get("area") or info.get("location") or "",
-            })
-        return {"properties": props}
+        if raw:
+            prop_map = _json_module.loads(raw)
     except Exception as e:
-        logger.warning("admin_list_properties: %s", e)
-        return {"properties": []}
+        logger.warning("admin_list_properties cache read: %s", e)
+
+    # Always return all brand pg_ids; use cache for enrichment
+    props = []
+    for pid in brand_pg_ids:
+        info = prop_map.get(pid, {})
+        props.append({
+            "prop_id": pid,
+            "name": info.get("pg_name") or info.get("name") or f"Property …{pid[-6:]}",
+            "area": info.get("area") or info.get("location") or "",
+        })
+    return {"properties": props}
 
 
 def _require_property_ownership(prop_id: str, brand_hash: str) -> None:
