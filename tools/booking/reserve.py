@@ -2,7 +2,9 @@ import httpx
 
 from config import settings
 from core.log import get_logger
+from core.signals import record_signal
 from db.redis_store import track_funnel, get_user_brand, track_property_event
+from utils.api import user_error
 from utils.properties import find_property as _find_property
 
 logger = get_logger("tools.reserve")
@@ -57,15 +59,15 @@ async def check_reserve_bed(user_id: str, property_name: str, **kwargs) -> str:
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                f"{settings.RENTOK_API_BASE_URL}/bookingBot/reserveProperty",
-                json={"user_id": user_id, "property_id": property_id, "check_only": True},
+                f"{settings.RENTOK_API_BASE_URL}/bookingBot/checkPropetyReserved",
+                json={"user_id": user_id, "property_id": property_id},
             )
             resp.raise_for_status()
             data = resp.json()
     except Exception as e:
-        return f"Error checking reservation status: {str(e)}"
+        return user_error("check the reservation status", e, logger=logger)
 
-    if data.get("success") or data.get("reserved"):
+    if data.get("data") is True:
         return f"A bed is already reserved for you at '{prop.get('property_name', property_name)}'."
     return f"No bed reserved yet at '{prop.get('property_name', property_name)}'. You can proceed with reservation."
 
@@ -88,9 +90,13 @@ async def reserve_bed(user_id: str, property_name: str, **kwargs) -> str:
             resp.raise_for_status()
             data = resp.json()
     except Exception as e:
-        return f"Error reserving bed: {str(e)}"
+        return user_error("reserve the bed", e, logger=logger)
 
-    if data.get("success"):
+    # reserveProperty (same /bookingBot/ family) may signal success via inner
+    # status==200 instead of a top-level `success` flag — accept either so a
+    # genuine reservation is never mis-reported (matches add-booking/shortlist).
+    if data.get("success") is True or data.get("status") in (200, "200"):
+        record_signal(booking_held=True, crm_synced=True)
         brand_hash_val = get_user_brand(user_id)
         track_funnel(user_id, "booking_initiated", brand_hash=brand_hash_val)
         try:

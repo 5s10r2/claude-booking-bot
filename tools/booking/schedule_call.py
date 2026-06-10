@@ -1,9 +1,11 @@
 from config import settings
 from core.log import get_logger
 from db.redis_store import get_user_phone
+from utils.api import user_error
 from utils.date import transcribe_date
 from utils.properties import find_property as _find_property
 from utils.retry import http_post
+from tools.booking.notify_manager import fire_booking_notification
 
 logger = get_logger("tools.schedule_call")
 
@@ -67,11 +69,16 @@ async def save_call_time(
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        return f"Error scheduling {visit_type.lower()}: {str(e)}"
+        return user_error(f"schedule your {visit_type.lower()}", e, logger=logger)
 
-    # Bug fix: 'and' was wrong — 200 + success:false would fall through silently.
-    # Now: any non-success body is treated as a failure regardless of HTTP status.
-    if not data.get("success"):
+    # /bookingBot/add-booking signals success via INNER status==200 with NO
+    # top-level `success` key — verified contract (the UAT P0 booking bug; see
+    # schedule_visit.py). Inner status 400 = dedup; inner 500 = real error.
+    inner_status = data.get("status") if isinstance(data, dict) else None
+    if inner_status in (400, "400"):
+        return "There is already a scheduled booking for this property or on the same date. Would you like to see your scheduled events?"
+    ok = data.get("success") is True or inner_status in (200, "200")
+    if not ok:
         msg = data.get("message", "unknown error")
         return f"Booking failed: {msg}. Please try again."
 
@@ -102,6 +109,10 @@ async def save_call_time(
                 f"Our team will reach out to you{' on ' + phone if phone else ''} to confirm. "
                 f"We apologize for the inconvenience!"
             )
+
+    # SILO — tell the manager a callback request landed (owner + team FCM). Background
+    # fire-and-forget; reached only after a confirmed booking + CRM lead.
+    fire_booking_notification("call", user_id, pg_id, pg_number, prop_display, visit_date, visit_time)
 
     return (
         f"{visit_type} scheduled successfully for '{prop_display}' "

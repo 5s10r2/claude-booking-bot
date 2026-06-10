@@ -1,3 +1,5 @@
+import asyncio
+
 from config import settings
 from core.log import get_logger
 from db.redis_store import (
@@ -12,11 +14,20 @@ from db.redis_store import (
     cancel_followups,
     get_user_brand,
 )
-from utils.api import check_rentok_response, RentokAPIError
+from utils.api import check_rentok_response, RentokAPIError, user_error
 from utils.properties import find_property as _find_property
 from utils.retry import http_get, http_post
+from tools.booking.notify_manager import fire_booking_notification
 
 logger = get_logger("tools.payment")
+
+# A brand-new tenant's CRM lead is not immediately resolvable to a tenant_uuid:
+# get-tenant_uuid can return empty for a second or two right after the lead is
+# created. Without a retry, a FIRST-time reservation fails the payment link (the
+# tenant exists on the next attempt). Retry a few times with a short backoff,
+# kept well under the 30s per-tool ceiling (core.tool_boundary.TOOL_TIMEOUT_SECONDS).
+_UUID_RETRIES = 3
+_UUID_RETRY_DELAY = 1.5  # seconds between retries → ≤4.5s added latency
 
 CREATE_PAYMENT_LINK_SCHEMA = {
     "name": "create_payment_link",
@@ -73,7 +84,10 @@ async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str
     except (RentokAPIError, Exception) as e:
         logger.warning("tenant UUID fetch failed for user=%s eazypg_id=%s: %s", user_id, eazypg_id, e)
 
-    # If no UUID yet, create a lead first then retry
+    # If no UUID yet, create a lead first, then poll for the tenant_uuid. The
+    # CRM is not read-after-write consistent here, so one immediate re-fetch
+    # often still returns empty for a brand-new tenant — retry with a short
+    # backoff instead of giving up on the user's first reservation.
     if not tenant_uuid:
         try:
             from tools.booking.schedule_visit import _create_external_lead
@@ -81,16 +95,28 @@ async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str
             await _create_external_lead(
                 user_id, eazypg_id, pg_id, pg_number, "", "", "",
             )
-            uuid_data = await http_get(
-                f"{settings.RENTOK_API_BASE_URL}/tenant/get-tenant_uuid",
-                params={"phone": phone, "eazypg_id": eazypg_id},
-            )
-            tenant_uuid = uuid_data.get("data", {}).get("tenant_uuid", "")
         except Exception as e2:
-            return f"Error creating payment link: {str(e2)}"
+            return user_error("generate the payment link", e2, logger=logger)
+
+        for _attempt in range(_UUID_RETRIES):
+            await asyncio.sleep(_UUID_RETRY_DELAY)
+            try:
+                uuid_data = await http_get(
+                    f"{settings.RENTOK_API_BASE_URL}/tenant/get-tenant_uuid",
+                    params={"phone": phone, "eazypg_id": eazypg_id},
+                )
+                tenant_uuid = uuid_data.get("data", {}).get("tenant_uuid", "")
+            except Exception as e3:
+                logger.warning(
+                    "tenant UUID retry %d/%d failed for user=%s: %s",
+                    _attempt + 1, _UUID_RETRIES, user_id, e3,
+                )
+                continue
+            if tenant_uuid:
+                break
 
     if not tenant_uuid:
-        return "Could not generate payment link. Please try again."
+        return "Could not generate payment link. Please try again in a moment."
 
     # Generate payment link
     try:
@@ -99,10 +125,8 @@ async def create_payment_link(user_id: str, property_name: str, **kwargs) -> str
             params={"pg_id": pg_id, "pg_number": pg_number, "amount": amount},
         )
         check_rentok_response(data, "lead-payment-link")
-    except RentokAPIError as e:
-        return f"Error generating payment link: {str(e)}"
-    except Exception as e:
-        return f"Error generating payment link: {str(e)}"
+    except (RentokAPIError, Exception) as e:
+        return user_error("generate the payment link", e, logger=logger)
 
     link_subs = data.get("data", {}).get("link", "")
     pg_name = data.get("data", {}).get("pg_name", prop.get("property_name", property_name))
@@ -138,13 +162,16 @@ async def verify_payment(user_id: str, **kwargs) -> str:
     amount = payment_info.get("amount", "")
     link_subs = payment_info.get("short_link", "")
 
-    # Record payment in backend
-    safe_user_id = user_id[:12] if len(user_id) >= 12 else user_id
+    # Record payment in backend. /bookingBot/addPayment returns HTTP 200 with a
+    # `status` field in the body even when the insert fails (status:500), so a
+    # clean HTTP status is not proof — inspect the body and never report success
+    # on a backend rejection. user_id column is `text` (no length limit) and the
+    # table is write-only, so send the full id, not a truncated one.
     try:
-        await http_post(
+        add_resp = await http_post(
             f"{settings.RENTOK_API_BASE_URL}/bookingBot/addPayment",
             json={
-                "user_id": safe_user_id,
+                "user_id": user_id,
                 "pg_id": pg_id,
                 "pg_number": pg_number,
                 "amount": amount,
@@ -152,8 +179,23 @@ async def verify_payment(user_id: str, **kwargs) -> str:
             },
         )
     except Exception as e:
-        logger.warning("addPayment API failed for user=%s pg_id=%s: %s", user_id, pg_id, e)
+        logger.error("addPayment API failed for user=%s pg_id=%s: %s", user_id, pg_id, e)
         return "Payment recording failed — please contact support to confirm your payment was received."
+
+    if isinstance(add_resp, dict):
+        status = add_resp.get("status")
+        rejected = (
+            add_resp.get("success") is False
+            or (isinstance(status, int) and status >= 400)
+            or (isinstance(status, str) and status.isdigit() and int(status) >= 400)
+            or (isinstance(status, str) and status.lower() == "error")
+        )
+        if rejected:
+            logger.error(
+                "addPayment rejected by backend for user=%s pg_id=%s: %s",
+                user_id, pg_id, add_resp.get("message", add_resp),
+            )
+            return "Payment recording failed — please contact support to confirm your payment was received."
 
     # Update lead status to Token
     info_map = get_property_info_map(user_id)
@@ -187,7 +229,8 @@ async def verify_payment(user_id: str, **kwargs) -> str:
                     "name": name,
                     "gender": gender,
                     "rent_range": budget,
-                    "lead_source": "Booking Bot",
+                    # Canonical bot source — C1 get-tenant_uuid resolves only this.
+                    "lead_source": "bookingBot00",
                     "visit_date": "",
                     "visit_time": "",
                     "visit_type": "",
@@ -208,6 +251,10 @@ async def verify_payment(user_id: str, **kwargs) -> str:
     track_funnel(user_id, "booking", brand_hash=brand_hash)
     track_funnel(user_id, "payment_completed", brand_hash=brand_hash)
     cancel_followups(user_id, "payment_pending")
+
+    # SILO — tell the manager a token was paid (owner + team FCM). Payment is already
+    # recorded (gate above); background fire-and-forget, never blocks/breaks the flow.
+    fire_booking_notification("token", user_id, pg_id, pg_number, pg_name, "", "")
 
     if eazypg_id and not lead_token_ok:
         phone = get_user_phone(user_id) or ""

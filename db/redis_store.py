@@ -90,6 +90,10 @@ from db.redis import (  # noqa: F401
     save_property_template,
     get_property_template,
     clear_property_template,
+    set_search_carousel,
+    get_search_carousel,
+    get_carousel_cursor,
+    set_carousel_cursor,
     set_property_images_id,
     get_property_images_id,
     clear_property_images_id,
@@ -134,6 +138,9 @@ from db.redis import (  # noqa: F401
     # Property outcome signals (Sprint 5)
     track_property_outcome,
     get_property_signals,
+    # Daily quality aggregate (trend sparkline + avg KPI)
+    track_daily_quality,
+    get_quality_trend,
     # Payment domain
     set_payment_info,
     get_payment_info,
@@ -149,6 +156,7 @@ from db.redis import (  # noqa: F401
     set_brand_config,
     get_brand_wa_config,
     get_brand_by_token,
+    get_default_brand_config,
     # Per-brand feature flags
     get_brand_flags,
     set_brand_flag,
@@ -173,4 +181,15 @@ from db.redis import (  # noqa: F401
     save_conversation_quality,
     get_conversation_quality,
     update_conversation_quality,
+    # Idempotency domain (Wave 3)
+    idem_begin,
+    idem_complete,
+    idem_release,
+    idem_clear,
+    # Self-serve brand accounts domain
+    get_account,
+    save_account,
+    account_exists,
+    set_email_verify_token,
+    consume_email_verify_token,
 )

@@ -27,16 +27,16 @@ SKILL_TOOLS: dict[str, list[str]] = {
     "compare":           ["compare_properties", "fetch_landmarks", "fetch_nearby_places"],
     "commute":           ["estimate_commute", "fetch_landmarks"],
     "shortlist":         ["shortlist_property"],
-    "show_more":         ["search_properties", "fetch_properties_by_query"],
+    "show_more":         ["search_properties", "fetch_properties_by_query", "show_more_properties"],
     "selling":           ["fetch_nearby_places", "estimate_commute", "fetch_room_details", "web_search"],
     "web_search":        ["web_search", "fetch_nearby_places"],
     "learning":          ["save_preferences"],  # For deal_breakers update
 }
 
 # Always included regardless of skill detection (safety net).
-# These are the two most common tools — ensures the agent can always
-# save preferences and search even if skill detection is wrong.
-ALWAYS_TOOLS: list[str] = ["save_preferences", "search_properties"]
+# save_preferences + search are the two most common tools; save_name is always
+# present so Tarini can capture a name the moment it's volunteered, on any turn.
+ALWAYS_TOOLS: list[str] = ["save_preferences", "search_properties", "save_name", "get_support_contact"]
 
 # Skills that are always loaded alongside any other skill.
 # NOTE: selling.md is 6.9k chars — too large to always load.

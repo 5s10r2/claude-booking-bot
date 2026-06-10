@@ -15,6 +15,32 @@ MAX_TOOL_ROUNDS = 15
 MAX_TOKENS_RESPONSE = 4096
 MAX_TOKENS_CLASSIFY = 256
 
+# Anthropic ephemeral prompt-cache pricing multipliers (relative to base input rate).
+_CACHE_WRITE_MULT = 1.25  # tokens written to cache
+_CACHE_READ_MULT = 0.10   # tokens served from cache
+
+
+def _usage_cost(usage, rates: dict) -> tuple[int, int, float]:
+    """Cache-aware token + cost accounting for one Anthropic response.
+
+    `usage.input_tokens` reports ONLY the uncached delta — the cached system
+    prompt and tools (the bulk of input on this app) surface as
+    cache_read/cache_creation tokens and were previously dropped, under-counting
+    both tokens and spend. Returns (total_input_tokens, output_tokens, cost_usd)
+    with cache reads billed at 0.1x and cache writes at 1.25x the input rate.
+    """
+    base_in = usage.input_tokens or 0
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    out = usage.output_tokens or 0
+    cost = (
+        base_in * rates["in"]
+        + cache_write * rates["in"] * _CACHE_WRITE_MULT
+        + cache_read * rates["in"] * _CACHE_READ_MULT
+        + out * rates["out"]
+    ) / 1_000_000
+    return base_in + cache_write + cache_read, out, cost
+
 
 class AnthropicEngine:
     def __init__(self, tool_executor: ToolExecutor):
@@ -58,22 +84,18 @@ class AnthropicEngine:
                 try:
                     from db.redis_store import increment_session_cost, get_user_brand
                     from db.redis.analytics import increment_agent_cost, increment_daily_cost
-                    usage = response.usage
                     _bh = get_user_brand(user_id)
-                    asyncio.create_task(asyncio.to_thread(
-                        increment_session_cost, user_id,
-                        usage.input_tokens, usage.output_tokens, model,
-                    ))
                     rates = getattr(settings, "COST_PER_MTK", {}).get(model, {"in": 0.0, "out": 0.0})
-                    turn_cost = (usage.input_tokens * rates["in"] + usage.output_tokens * rates["out"]) / 1_000_000
+                    tokens_in, tokens_out, turn_cost = _usage_cost(response.usage, rates)
+                    asyncio.create_task(asyncio.to_thread(
+                        increment_session_cost, user_id, tokens_in, tokens_out, turn_cost,
+                    ))
                     asyncio.create_task(asyncio.to_thread(
                         increment_agent_cost, agent_name,
-                        usage.input_tokens, usage.output_tokens, turn_cost,
-                        brand_hash=_bh,
+                        tokens_in, tokens_out, turn_cost, brand_hash=_bh,
                     ))
                     asyncio.create_task(asyncio.to_thread(
-                        increment_daily_cost, turn_cost,
-                        brand_hash=_bh,
+                        increment_daily_cost, turn_cost, brand_hash=_bh,
                     ))
                 except Exception:
                     pass  # intentional: metrics are best-effort
@@ -174,6 +196,7 @@ class AnthropicEngine:
                 "max_tokens": MAX_TOKENS_RESPONSE,
                 "system": system,
                 "messages": messages,
+                "timeout": settings.LLM_REQUEST_TIMEOUT,
             }
             if cached_tools:
                 kwargs["tools"] = cached_tools
@@ -232,24 +255,20 @@ class AnthropicEngine:
                 try:
                     from db.redis_store import increment_session_cost, get_user_brand
                     from db.redis.analytics import increment_agent_cost, increment_daily_cost
-                    usage = response.usage
                     _bh = get_user_brand(user_id)
+                    rates = getattr(settings, "COST_PER_MTK", {}).get(model, {"in": 0.0, "out": 0.0})
+                    tokens_in, tokens_out, turn_cost = _usage_cost(response.usage, rates)
                     # Per-user rolling session cost (7-day TTL)
                     asyncio.create_task(asyncio.to_thread(
-                        increment_session_cost, user_id,
-                        usage.input_tokens, usage.output_tokens, model,
+                        increment_session_cost, user_id, tokens_in, tokens_out, turn_cost,
                     ))
                     # Per-agent + daily totals (90-day TTL, powers command-center)
-                    rates = getattr(settings, "COST_PER_MTK", {}).get(model, {"in": 0.0, "out": 0.0})
-                    turn_cost = (usage.input_tokens * rates["in"] + usage.output_tokens * rates["out"]) / 1_000_000
                     asyncio.create_task(asyncio.to_thread(
                         increment_agent_cost, agent_name,
-                        usage.input_tokens, usage.output_tokens, turn_cost,
-                        brand_hash=_bh,
+                        tokens_in, tokens_out, turn_cost, brand_hash=_bh,
                     ))
                     asyncio.create_task(asyncio.to_thread(
-                        increment_daily_cost, turn_cost,
-                        brand_hash=_bh,
+                        increment_daily_cost, turn_cost, brand_hash=_bh,
                     ))
                 except Exception:
                     pass  # intentional: metrics are best-effort
@@ -331,6 +350,7 @@ class AnthropicEngine:
                     max_tokens=MAX_TOKENS_CLASSIFY,
                     system=system,
                     messages=messages,
+                    timeout=settings.LLM_CLASSIFY_TIMEOUT,
                 )
                 raw = self._extract_text(response).strip()
                 if not raw:
@@ -366,6 +386,7 @@ class AnthropicEngine:
                     "max_tokens": MAX_TOKENS_RESPONSE,
                     "system": system,
                     "messages": messages,
+                    "timeout": settings.LLM_REQUEST_TIMEOUT,
                 }
                 if tools:
                     kwargs["tools"] = tools
@@ -402,15 +423,19 @@ class AnthropicEngine:
         - str: Single block, fully cached (legacy — all agents except dynamic broker)
         - list[str]: Two blocks — first cached (base), second dynamic (NOT cached)
         """
+        from core.untrusted import UNTRUSTED_CONTENT_RULE
+        # Prepend the standing untrusted-content rule to the first (cached) block so
+        # every agent inherits it. The prefix is constant → cache stays warm.
+        prefix = UNTRUSTED_CONTENT_RULE + "\n\n"
         if isinstance(system_prompt, list):
             blocks = [
-                {"type": "text", "text": system_prompt[0], "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": prefix + system_prompt[0], "cache_control": {"type": "ephemeral"}},
             ]
             if len(system_prompt) > 1 and system_prompt[1]:
                 blocks.append({"type": "text", "text": system_prompt[1]})
             return blocks
         return [
-            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": prefix + system_prompt, "cache_control": {"type": "ephemeral"}},
         ]
 
     @staticmethod
@@ -423,17 +448,45 @@ class AnthropicEngine:
 
     @staticmethod
     def _clean_json(text: str) -> str:
-        """Extract JSON from text that may have markdown fences or extra text."""
+        """Extract a JSON object from text that may have markdown fences,
+        surrounding prose, nested objects, or single quotes.
+
+        Robustness matters: the supervisor's reply is Haiku output, and any
+        recovery failure here burns a retry and can drop routing to `default`
+        (the UAT `classify attempt N failed` log spam). Improvements over the
+        old ``\\{[^{}]*\\}`` regex: (1) extract the first BRACE-BALANCED object
+        so nested objects and trailing prose are handled; (2) tolerate
+        single-quoted JSON as a last resort.
+        """
+        import json as _json
         import re
         # Strip markdown code fences (```json ... ``` or ``` ... ```)
         text = re.sub(r"```(?:json)?\s*", "", text)
-        text = re.sub(r"```", "", text)
-        text = text.strip()
-        # If still not starting with {, find the first JSON object
-        if not text.startswith("{"):
-            match = re.search(r"\{[^{}]*\}", text)
-            if match:
-                text = match.group(0)
+        text = re.sub(r"```", "", text).strip()
+        # Extract the first brace-balanced {...} object (drops surrounding prose
+        # and trailing text; handles nested objects the flat regex could not).
+        start = text.find("{")
+        if start != -1:
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        text = text[start:i + 1]
+                        break
+        # Tolerate single-quoted JSON (a common Haiku slip) — only if the
+        # double-quoted form doesn't already parse, so valid JSON is untouched.
+        try:
+            _json.loads(text)
+        except Exception:
+            swapped = text.replace("'", '"')
+            try:
+                _json.loads(swapped)
+                text = swapped
+            except Exception:
+                pass
         return text
 
     @staticmethod

@@ -26,22 +26,81 @@ class Settings(BaseSettings):
     # OSRM (map distance service)
     OSRM_API_KEY: str = ""
 
+    # LLM request timeouts (seconds) — bound a single Anthropic call so a hung
+    # upstream request can't pin an agent iteration (SDK default is ~10 min).
+    LLM_REQUEST_TIMEOUT: float = 120.0
+    LLM_CLASSIFY_TIMEOUT: float = 30.0
+
     # WhatsApp (defaults from env, not hardcoded tokens)
     WHATSAPP_ACCESS_TOKEN: Optional[str] = None
     WHATSAPP_VERIFY_TOKEN: str = "booking-bot-verify"
+
+    # Webhook payload authenticity (HMAC-SHA256 over the RAW request body).
+    # WHATSAPP_APP_SECRET: Meta app secret — when set, POST /webhook/whatsapp requires a
+    #   valid X-Hub-Signature-256 header. When empty, falls back to legacy X-API-Key auth.
+    # PAYMENT_WEBHOOK_SECRET: shared secret for POST /webhook/payment — when set, requires a
+    #   valid X-Webhook-Signature header. When empty, falls back to legacy X-API-Key auth.
+    WHATSAPP_APP_SECRET: str = ""
+    PAYMENT_WEBHOOK_SECRET: str = ""
 
     # Models
     HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
     SONNET_MODEL: str = "claude-sonnet-4-6"
 
-    # Cost per million tokens (USD) — used by increment_session_cost
+    # OpenRouter (model gateway for bake-offs)
+    OPENROUTER_API_KEY: Optional[str] = None
+
+    # Cost per million tokens (USD) — base input/output rates; cache reads
+    # billed 0.1x and cache writes 1.25x via core.claude._usage_cost
     COST_PER_MTK: dict = {
         "claude-haiku-4-5-20251001": {"in": 0.80,  "out": 4.00},
         "claude-sonnet-4-6":         {"in": 3.00,  "out": 15.00},
+        # Non-Anthropic bake-off models (via OpenRouter / LiteLLM). Keys MUST match
+        # the LiteLLM model string set as the override (the @provider/quant suffix
+        # is stripped before lookup, so key on the base model). Cost is the listed
+        # GLM-4.6 provider rate; the exact bill is on the OpenRouter dashboard.
+        # ⚠️ RECOMMENDED GLM-4.6 config (bake-off winner 2026-06-07): pin Novita @
+        # bf16 → `openrouter/z-ai/glm-4.6@novita/bf16` (full-precision = no tool-name
+        # truncation, Western host = DPDP-low, ~5.5s w/ non-thinking default).
+        # Rate below = Novita's ($0.55/$2.20). AVOID @deepinfra/@venice (fp4 only →
+        # truncated tool names) and @atlascloud (fp8 also truncated in testing).
+        "openrouter/z-ai/glm-4.6":          {"in": 0.55,  "out": 2.20},
+        "openrouter/z-ai/glm-4.6:exacto":   {"in": 0.55,  "out": 2.20},
     }
 
     # API auth (set in .env; if empty, auth is disabled)
     API_KEY: Optional[str] = None
+
+    # Admin-panel login gate (ID + password → brand API key).
+    # The admin SPA no longer ships the raw brand key; it POSTs credentials to
+    # /admin/login, which validates them server-side and returns the key the
+    # browser then uses as X-API-Key. Credentials live ONLY in env (never in
+    # the bundle / git). Set ADMIN_LOGIN_PASSWORD (plaintext, hashed at load)
+    # OR ADMIN_LOGIN_PASSWORD_SHA256 (preferred). If neither is set, /admin/login
+    # returns 503 and the panel cannot be entered.
+    ADMIN_LOGIN_USERNAME: str = "oxotel"
+    ADMIN_LOGIN_PASSWORD: str = ""          # convenience: plaintext in env, sha256'd in memory
+    ADMIN_LOGIN_PASSWORD_SHA256: str = ""   # preferred: store only the hex digest
+    ADMIN_LOGIN_API_KEY: str = ""           # key returned on success; falls back to DEFAULT_BRAND_API_KEY
+    ADMIN_LOGIN_MAX_FAILS: int = 10         # failed attempts before throttle kicks in
+    ADMIN_LOGIN_THROTTLE_SECONDS: int = 900 # 15-min lockout window for brute-force protection
+
+    # Multi-tenant web channel: brand used for tokenless web traffic (demo / no ?brand= link).
+    # The web channel NEVER trusts a client-supplied brand_hash/pg_ids — tenant identity is
+    # resolved server-side from the verified link token, falling back to this default brand.
+    DEFAULT_BRAND_API_KEY: str = "OxOtel1234"
+
+    # Self-serve signup — demo brand provisioning
+    DEMO_PG_IDS: list[str] = []        # sandbox property ids a fresh signup's demo bot serves (set in env for live demo)
+    DEMO_CITIES: list[str] = ["Mumbai"]
+    DEMO_AREAS: list[str] = []
+    ADMIN_BASE_URL: str = "https://eazypg-admin.vercel.app"  # used to build the email-verification link
+    # Self-serve signup — per-IP abuse throttle (unauthenticated endpoint)
+    SIGNUP_MAX_PER_WINDOW: int = 10
+    SIGNUP_RATE_WINDOW_SECONDS: int = 3600  # 1h
+    # Per-IP login throttle — catches credential-stuffing that rotates the username
+    # (the per-username throttle alone never trips when the attacker varies emails).
+    LOGIN_IP_MAX_FAILS: int = 50
 
     # Web Intelligence
     TAVILY_API_KEY: Optional[str] = None  # Tavily search API key for web intelligence
@@ -60,6 +119,10 @@ class Settings(BaseSettings):
     MAX_AGENT_ITERATIONS: int = 15
     CONVERSATION_HISTORY_LIMIT: int = 20
     CONVERSATION_TTL_SECONDS: int = 86400  # 24 hours
+
+    # Tool-boundary hardening (Wave 3) — enforced at the ToolExecutor seam
+    TOOL_TIMEOUT_SECONDS: float = 30.0    # per-tool execution ceiling (asyncio.wait_for)
+    IDEMPOTENCY_WINDOW_SECONDS: int = 90  # burst-dedup window for write-path tools
 
     # Conversation summarization
     SUMMARIZE_THRESHOLD: int = 30       # trigger summarization at this message count

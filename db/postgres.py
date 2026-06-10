@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 import asyncpg
@@ -16,13 +16,18 @@ _pgvector_available = False  # Set True after successful pgvector init
 
 
 async def _init_conn(conn) -> None:
-    """Per-connection init callback: register pgvector type if available."""
-    if _pgvector_available:
-        try:
-            from pgvector.asyncpg import register_vector
-            await register_vector(conn)
-        except Exception:
-            pass  # pgvector not available — silently skip
+    """Per-connection init callback.
+
+    We intentionally do NOT register the pgvector asyncpg codec. The codec makes
+    asyncpg expect a Python list for `vector` params, but update_document_embedding
+    and search_relevant_docs bind a hand-built "[...]" STRING with an explicit
+    ``::vector`` cast. With the codec registered, asyncpg tried to encode that
+    string as a vector and failed with `could not convert string to float` —
+    every semantic-KB query died (UAT log flood). Letting the param bind as text
+    and casting server-side via ``::vector`` is dependency-free and works whether
+    or not the pgvector Python package is installed.
+    """
+    return None
 
 
 async def init_pool() -> None:
@@ -100,19 +105,22 @@ async def get_message_volume(start_date: str, end_date: str, brand_hash: Optiona
     if _pool is None:
         return {}
     try:
+        from datetime import timedelta
+        start = datetime.fromisoformat(start_date)
+        end = datetime.fromisoformat(end_date) + timedelta(days=1)
         if brand_hash:
             rows = await _pool.fetch(
                 """
                 SELECT DATE(created_at) AS day, COUNT(*) AS cnt
                 FROM booking_messages
-                WHERE created_at >= $1::date
-                  AND created_at < ($2::date + INTERVAL '1 day')
+                WHERE created_at >= $1
+                  AND created_at < $2
                   AND brand_hash = $3
                 GROUP BY DATE(created_at)
                 ORDER BY day
                 """,
-                start_date,
-                end_date,
+                start,
+                end,
                 brand_hash,
             )
         else:
@@ -120,18 +128,48 @@ async def get_message_volume(start_date: str, end_date: str, brand_hash: Optiona
                 """
                 SELECT DATE(created_at) AS day, COUNT(*) AS cnt
                 FROM booking_messages
-                WHERE created_at >= $1::date
-                  AND created_at < ($2::date + INTERVAL '1 day')
+                WHERE created_at >= $1
+                  AND created_at < $2
                 GROUP BY DATE(created_at)
                 ORDER BY day
                 """,
-                start_date,
-                end_date,
+                start,
+                end,
             )
         return {str(r["day"]): r["cnt"] for r in rows}
     except Exception as e:
         logger.error("get_message_volume error: %s", e)
         return {}
+
+
+async def create_booking_messages_table() -> None:
+    """Create booking_messages table if it doesn't exist (called on startup)."""
+    if _pool is None:
+        return
+    try:
+        await _pool.execute("""
+            CREATE TABLE IF NOT EXISTS booking_messages (
+                id               SERIAL PRIMARY KEY,
+                thread_id        VARCHAR(255) NOT NULL,
+                user_phone       VARCHAR(50),
+                message_text     TEXT,
+                message_sent_by  INT,
+                created_at       TIMESTAMP    DEFAULT NOW(),
+                updated_at       TIMESTAMP    DEFAULT NOW(),
+                platform_type    VARCHAR(50),
+                is_template      BOOLEAN      DEFAULT FALSE,
+                pg_ids           TEXT,
+                brand_hash       VARCHAR(16)
+            );
+            CREATE INDEX IF NOT EXISTS idx_booking_messages_thread_id
+                ON booking_messages(thread_id);
+            CREATE INDEX IF NOT EXISTS idx_booking_messages_brand_hash
+                ON booking_messages(brand_hash);
+            CREATE INDEX IF NOT EXISTS idx_booking_messages_created_at
+                ON booking_messages(created_at);
+        """)
+    except Exception as e:
+        logger.warning("create_booking_messages_table: %s", e)
 
 
 async def add_brand_hash_columns() -> None:
@@ -153,6 +191,14 @@ async def add_brand_hash_columns() -> None:
         """)
     except Exception as e:
         logger.warning("add_brand_hash_columns (leads): %s", e)
+    try:
+        await _pool.execute("""
+            ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_outcome TEXT;
+            ALTER TABLE leads ADD COLUMN IF NOT EXISTS outcome_at TIMESTAMP;
+            ALTER TABLE leads ADD COLUMN IF NOT EXISTS converted_property_id TEXT;
+        """)
+    except Exception as e:
+        logger.warning("add_brand_hash_columns (leads outcome cols): %s", e)
 
 
 async def create_property_documents_table() -> None:
@@ -304,8 +350,19 @@ async def create_leads_table() -> None:
         logger.warning("create_leads_table: %s", e)
 
 
-async def upsert_leads(rows: list[dict], brand_hash: Optional[str] = None) -> None:
-    """Batch upsert enriched lead snapshots. Called fire-and-forget from admin endpoints."""
+async def upsert_leads(
+    rows: list[dict],
+    brand_hash: Optional[str] = None,
+    lead_outcome: Optional[str] = None,
+    outcome_at: Optional[datetime] = None,
+    converted_property_id: Optional[str] = None,
+) -> None:
+    """Batch upsert enriched lead snapshots. Called fire-and-forget from admin endpoints.
+
+    lead_outcome, outcome_at, converted_property_id are optional; when provided they
+    override the stored value via COALESCE (non-null wins). When omitted the existing
+    DB value is preserved.
+    """
     if _pool is None or not rows:
         return
     try:
@@ -316,10 +373,12 @@ async def upsert_leads(rows: list[dict], brand_hash: Optional[str] = None) -> No
                 first_seen, last_seen, session_count, viewed_count, shortlisted_count,
                 visits_count, deal_breakers, must_haves, lead_score, location_pref,
                 budget_min, budget_max, budget, property_type, amenities,
-                sharing_types, cost_usd, brand_hash, synced_at
+                sharing_types, cost_usd, brand_hash,
+                lead_outcome, outcome_at, converted_property_id,
+                synced_at
             )
             VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW()
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,NOW()
             )
             ON CONFLICT (uid) DO UPDATE SET
                 name=EXCLUDED.name, phone=EXCLUDED.phone,
@@ -334,6 +393,9 @@ async def upsert_leads(rows: list[dict], brand_hash: Optional[str] = None) -> No
                 property_type=EXCLUDED.property_type, amenities=EXCLUDED.amenities,
                 sharing_types=EXCLUDED.sharing_types, cost_usd=EXCLUDED.cost_usd,
                 brand_hash=EXCLUDED.brand_hash,
+                lead_outcome=COALESCE(EXCLUDED.lead_outcome, leads.lead_outcome),
+                outcome_at=COALESCE(EXCLUDED.outcome_at, leads.outcome_at),
+                converted_property_id=COALESCE(EXCLUDED.converted_property_id, leads.converted_property_id),
                 synced_at=NOW()
             """,
             [
@@ -360,6 +422,9 @@ async def upsert_leads(rows: list[dict], brand_hash: Optional[str] = None) -> No
                     json.dumps(r.get("sharing_types") or []),
                     float(r.get("cost_usd") or 0.0),
                     brand_hash,
+                    r.get("lead_outcome") or lead_outcome,
+                    r.get("outcome_at") or outcome_at,
+                    r.get("converted_property_id") or converted_property_id,
                 )
                 for r in rows
             ],
@@ -392,18 +457,41 @@ async def enable_pgvector() -> None:
     global _pgvector_available
     if _pool is None:
         return
+    # category column has no pgvector dependency — always add it
+    try:
+        await _pool.execute(
+            "ALTER TABLE property_documents ADD COLUMN IF NOT EXISTS category VARCHAR(30);"
+        )
+    except Exception as e:
+        logger.warning("category column migration: %s", e)
+    # embedding column requires the pgvector extension
     try:
         await _pool.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        await _pool.execute("""
-            ALTER TABLE property_documents
-                ADD COLUMN IF NOT EXISTS category VARCHAR(30),
-                ADD COLUMN IF NOT EXISTS embedding vector(256);
-        """)
+        await _pool.execute(
+            "ALTER TABLE property_documents ADD COLUMN IF NOT EXISTS embedding vector(256);"
+        )
         _pgvector_available = True
-        logger.info("pgvector enabled, embedding columns ready")
+        logger.info("pgvector enabled, embedding column ready")
     except Exception as e:
         logger.warning("pgvector setup skipped (non-critical): %s", e)
         _pgvector_available = False
+
+
+async def get_property_doc_counts(property_ids: list[str]) -> dict[str, int]:
+    """Return {property_id: doc_count} for the given ids. Missing ids default to 0."""
+    if _pool is None or not property_ids:
+        return {}
+    try:
+        rows = await _pool.fetch(
+            "SELECT property_id, COUNT(*)::int AS cnt"
+            " FROM property_documents WHERE property_id = ANY($1::text[])"
+            " GROUP BY property_id",
+            property_ids,
+        )
+        return {r["property_id"]: r["cnt"] for r in rows}
+    except Exception as e:
+        logger.warning("get_property_doc_counts: %s", e)
+        return {}
 
 
 async def update_document_embedding(doc_id: int, embedding: list[float]) -> None:
@@ -411,11 +499,10 @@ async def update_document_embedding(doc_id: int, embedding: list[float]) -> None
     if _pool is None or not _pgvector_available:
         return
     try:
-        import numpy as np
-        vec = np.array(embedding, dtype=np.float32)
+        vec_str = "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
         await _pool.execute(
-            "UPDATE property_documents SET embedding = $1 WHERE id = $2",
-            vec, doc_id,
+            "UPDATE property_documents SET embedding = $1::vector WHERE id = $2",
+            vec_str, doc_id,
         )
     except Exception as e:
         logger.warning("update_document_embedding(%s): %s", doc_id, e)
@@ -437,8 +524,7 @@ async def search_relevant_docs(
     if not property_ids or not categories or not query_embedding:
         return []
     try:
-        import numpy as np
-        vec = np.array(query_embedding, dtype=np.float32)
+        vec_str = "[" + ",".join(f"{v:.8f}" for v in query_embedding) + "]"
         rows = await _pool.fetch(
             """
             SELECT property_id, filename, content_text
@@ -446,10 +532,10 @@ async def search_relevant_docs(
             WHERE property_id = ANY($1::varchar[])
               AND category = ANY($2::varchar[])
               AND embedding IS NOT NULL
-            ORDER BY embedding <=> $3
+            ORDER BY embedding <=> $3::vector
             LIMIT $4
             """,
-            property_ids, categories, vec, limit,
+            property_ids, categories, vec_str, limit,
         )
         return [
             {"property_id": r["property_id"], "filename": r["filename"], "text": r["content_text"]}

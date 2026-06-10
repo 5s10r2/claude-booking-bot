@@ -1,0 +1,85 @@
+name: CI
+
+# Hermetic security regression gate. Runs the in-process security suite — no
+# network, no Redis, no LLM, no Postgres — so it is fast and deterministic.
+#   - pull_request: required status check; protects main from regressions.
+#   - workflow_call: reused by deploy-render.yml so a broken main never deploys.
+# (No direct push trigger: on push the deploy workflow invokes this as its gate,
+#  which avoids running the suite twice for the same commit.)
+on:
+  pull_request:
+    branches: [main]
+  workflow_call:
+
+jobs:
+  security-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run hermetic security suite
+        env:
+          # The suite never calls Anthropic; core.claude only needs the setting
+          # present at import time. A dummy value keeps it fully offline.
+          ANTHROPIC_API_KEY: test-key-not-used
+        run: |
+          set -e
+          for t in \
+            test_untrusted_content.py \
+            test_tenant_isolation.py \
+            test_webhook_signature.py \
+            test_cost_accounting.py \
+            test_server_stop.py \
+            test_engine_contract.py \
+            test_tool_boundary.py \
+            test_wave_a.py \
+            test_contract_alignment.py \
+            test_gender_filter.py \
+            test_shortlist_contract.py \
+            test_booking_contract.py \
+            test_language_mirroring.py \
+            test_classify_robustness.py \
+            test_pgvector_param.py \
+            test_admin_login.py \
+            test_quality_analytics.py \
+            test_listing_leak.py \
+            test_contract.py \
+            test_contract_parity.py \
+            test_cross_contract.py \
+            test_signals.py \
+            test_lat1_concurrent.py \
+            test_signal_robustness.py \
+            test_ui_parts_native.py \
+            test_channel_adapter.py \
+            test_web_egress.py \
+            test_whatsapp_egress.py \
+            test_presentation_polish.py \
+            test_contract_fixtures.py \
+            test_carousel_contract.py \
+            test_show_more_native.py \
+            test_lead_enrichment.py \
+            test_commute_ranking.py \
+            test_intent_ranking.py \
+            test_manager_notify.py \
+            test_osrm_circuit.py \
+            test_name_personalization.py \
+            test_support_contact.py \
+            test_accounts_signup.py \
+            test_kyc_honesty.py \
+            test_payment_uuid_retry.py \
+            test_model_router.py \
+            test_api_key_brand_resolution.py \
+            test_h3_profile_routing.py \
+            test_m1_hindi_qualifying.py; do
+            echo "::group::$t"
+            python "$t"
+            echo "::endgroup::"
+          done

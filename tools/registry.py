@@ -17,6 +17,7 @@ _KYC_TOOLS: list[str] = ["fetch_kyc_status", "initiate_kyc", "verify_kyc"]
 _PAYMENT_TOOLS: list[str] = ["create_payment_link", "verify_payment"]
 _BOOKING_BASE_TOOLS: list[str] = [
     "save_phone_number",
+    "get_support_contact",
     "save_visit_time",
     "save_call_time",
     # create_payment_link, verify_payment → moved to _PAYMENT_TOOLS (conditional on PAYMENT_REQUIRED)
@@ -27,9 +28,11 @@ _BOOKING_BASE_TOOLS: list[str] = [
 ]
 
 _AGENT_TOOLS: dict[str, list[str]] = {
-    "default": ["brand_info", "web_search"],
+    "default": ["brand_info", "web_search", "get_support_contact"],
     "broker": [
         "save_preferences",
+        "save_name",
+        "get_support_contact",
         "search_properties",
         "fetch_property_details",
         "shortlist_property",
@@ -39,6 +42,7 @@ _AGENT_TOOLS: dict[str, list[str]] = {
         "fetch_nearby_places",
         "fetch_room_details",
         "fetch_properties_by_query",
+        "show_more_properties",
         "compare_properties",
         "web_search",
     ],
@@ -71,6 +75,12 @@ def get_all_handlers() -> dict[str, Callable]:
     return dict(_TOOL_HANDLERS)
 
 
+def get_input_schema(name: str) -> dict | None:
+    """Return a tool's JSON input_schema for boundary validation (None if unknown)."""
+    schema = _TOOL_SCHEMAS.get(name)
+    return schema.get("input_schema") if schema else None
+
+
 def get_schemas_by_names(tool_names: list[str]) -> list[dict]:
     """Return schemas for specific tool names (for skill-based tool filtering)."""
     return [_TOOL_SCHEMAS[n] for n in tool_names if n in _TOOL_SCHEMAS]
@@ -90,6 +100,8 @@ def init_registry() -> None:
     """
     # -- broker --
     from tools.broker.preferences import save_preferences, TOOL_SCHEMA as _save_prefs_schema
+    from tools.broker.save_name import save_name, TOOL_SCHEMA as _save_name_schema
+    from tools.broker.support_contact import get_support_contact, TOOL_SCHEMA as _support_contact_schema
     from tools.broker.search import search_properties, TOOL_SCHEMA as _search_schema
     from tools.broker.property_details import fetch_property_details, TOOL_SCHEMA as _details_schema
     from tools.broker.shortlist import shortlist_property, TOOL_SCHEMA as _shortlist_schema
@@ -101,6 +113,7 @@ def init_registry() -> None:
     from tools.broker.nearby_places import fetch_nearby_places, TOOL_SCHEMA as _nearby_schema
     from tools.broker.room_details import fetch_room_details, TOOL_SCHEMA as _rooms_schema
     from tools.broker.query_properties import fetch_properties_by_query, TOOL_SCHEMA as _query_schema
+    from tools.broker.show_more import show_more_properties, TOOL_SCHEMA as _show_more_schema
     from tools.broker.compare import compare_properties, TOOL_SCHEMA as _compare_schema
 
     # -- common --
@@ -134,9 +147,11 @@ def init_registry() -> None:
     from tools.profile.events import get_scheduled_events, TOOL_SCHEMA as _events_schema
     from tools.profile.shortlisted import get_shortlisted_properties, TOOL_SCHEMA as _shortlisted_schema
 
-    # Register all 28 tools: (name, schema, handler)
+    # Register all 30 tools: (name, schema, handler)
     register_tool("brand_info",                _brand_schema,            brand_info)
     register_tool("save_preferences",          _save_prefs_schema,       save_preferences)
+    register_tool("save_name",                 _save_name_schema,        save_name)
+    register_tool("get_support_contact",        _support_contact_schema,  get_support_contact)
     register_tool("search_properties",         _search_schema,           search_properties)
     register_tool("fetch_property_details",    _details_schema,          fetch_property_details)
     register_tool("shortlist_property",        _shortlist_schema,        shortlist_property)
@@ -146,6 +161,7 @@ def init_registry() -> None:
     register_tool("fetch_nearby_places",       _nearby_schema,           fetch_nearby_places)
     register_tool("fetch_room_details",        _rooms_schema,            fetch_room_details)
     register_tool("fetch_properties_by_query", _query_schema,            fetch_properties_by_query)
+    register_tool("show_more_properties",      _show_more_schema,        show_more_properties)
     register_tool("compare_properties",        _compare_schema,          compare_properties)
     register_tool("web_search",                _websearch_schema,        web_search)
     register_tool("save_phone_number",         _phone_schema,            save_phone_number)

@@ -8,6 +8,24 @@ class RentokAPIError(Exception):
     pass
 
 
+def user_error(action: str, exc: object = "", *, logger=None) -> str:
+    """Clean, user-facing error message that never leaks internals.
+
+    The real exception (which can carry URLs, HTTP status codes, tracebacks, or
+    raw Python error text) is logged when a logger is supplied, but never put in
+    the returned string — the user only ever sees a friendly apology.
+
+    `action` is a short verb phrase describing what failed, e.g. "cancel your
+    booking" → "Sorry, I couldn't cancel your booking right now ...".
+    """
+    if logger is not None and exc:
+        logger.error("%s failed: %s", action, exc)
+    return (
+        f"Sorry, I couldn't {action} right now due to a temporary issue. "
+        "Please try again in a moment."
+    )
+
+
 def check_rentok_response(data: dict, context: str = "") -> dict:
     """Validate Rentok API response. Raises RentokAPIError if payload indicates failure."""
     status = data.get("status")
@@ -94,3 +112,45 @@ def parse_sharing_types(val, fallback: str = "") -> str:
                 parts.append(str(item))
         return ", ".join(parts) or fallback
     return str(val) or fallback
+
+
+def parse_sharing_types_structured(val) -> list:
+    """Structured form of parse_sharing_types for the detail sheet's 'Choose sharing'
+    section. The frontend (eazypg-chat property-sheet.js _sharingOptions) reads an
+    ARRAY of {label, price} — a flat display string (parse_sharing_types) fails its
+    Array.isArray check and renders nothing.
+
+    Accepts the RentOK list-of-dicts shape (same fields parse_sharing_types reads);
+    skips disabled entries. Returns [] for empty / string / unknown shapes so the
+    sheet section stays hidden (graceful degradation, no empty shell).
+    """
+    if not val or not isinstance(val, list):
+        return []
+    out = []
+    for item in val:
+        if isinstance(item, dict):
+            stype = item.get("sharing_type") or item.get("type") or item.get("name", "")
+            enabled = item.get("is_enabled", item.get("enabled", True))
+            if not stype or not enabled:
+                continue
+            rent = (item.get("rent") or item.get("starting_rent")
+                    or item.get("rent_starts_from", ""))
+            out.append({"label": _humanize_sharing(stype), "price": f"₹{rent}/mo" if rent else ""})
+        elif item:
+            out.append({"label": _humanize_sharing(item), "price": ""})
+    return out
+
+
+# RentOK ships sharing as a bare occupancy count ("1"/"2"/"3"); a user must never see "3".
+_SHARING_LABELS = {"1": "Single", "2": "Double sharing", "3": "Triple sharing"}
+
+
+def _humanize_sharing(stype) -> str:
+    """Map a sharing type to a human label. Numeric counts → words / "N-sharing";
+    an already-human label (e.g. "Double") passes through unchanged."""
+    s = str(stype).strip()
+    if s in _SHARING_LABELS:
+        return _SHARING_LABELS[s]
+    if s.isdigit():
+        return f"{s}-sharing"
+    return s

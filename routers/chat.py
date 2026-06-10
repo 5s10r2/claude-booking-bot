@@ -12,22 +12,30 @@ Routes:
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import core.state as state
 from core.auth import verify_api_key
 from core.log import get_logger
-from core.message_parser import parse_message_parts
+from core.channel_adapter import adapt
+from core.message_parser import parse_message_parts, drop_scraped_carousel
 from core.pipeline import run_pipeline, _route_agent
 from core.rate_limiter import check_rate_limit
-from core.ui_parts import generate_ui_parts, make_error_part
+from core.signals import current_signals, reset_signals
+from core.tenancy import resolve_web_brand
+from core.ui_parts import generate_ui_parts, make_error_part, make_human_handoff_part, has_native_listing_carousel
 from db import postgres as pg
 from db.redis_store import (
     set_account_values,
     set_whitelabel_pg_ids,
+    set_user_brand,
+    get_user_brand,
+    add_to_brand_active_users,
     get_human_mode,
+    get_brand_config,
+    get_brand_config_by_hash,
     get_conversation,
     save_conversation,
     get_user_language,
@@ -36,6 +44,8 @@ from db.redis_store import (
     get_feedback_counts,
     get_funnel,
     set_last_agent,
+    set_cancel_requested,
+    clear_cancel_requested,
 )
 from agents import broker_agent, booking_agent, profile_agent, default_agent
 
@@ -52,6 +62,7 @@ class ChatRequest(BaseModel):
     user_id: str
     message: str
     account_values: dict = {}
+    brand_token: str = ""  # public link token — the ONLY trusted source of brand identity
 
 
 class ChatResponse(BaseModel):
@@ -73,41 +84,91 @@ class LanguageRequest(BaseModel):
     language: str  # "en", "hi", or "mr"
 
 
+class StopRequest(BaseModel):
+    user_id: str
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _apply_web_brand(
+    user_id: str, account_values: dict, brand_token: str, api_key: str = ""
+) -> tuple[str, list[str]]:
+    """Resolve + persist server-authoritative brand identity for a web request.
+
+    Resolution order:
+    1. Verified link token (brand_token / account_values.token) — web frontend path.
+    2. API key lookup — direct API callers (e.g. Alliance) that send X-API-Key but
+       no brand link token.  Fixes cross-brand contamination: without this, tokenless
+       requests fall through to get_default_brand_config() = OxOtel.
+    3. Configured default brand — tokenless demo/preview traffic.
+    """
+    # Check whether a real link token is present before falling through.
+    token = (brand_token or "").strip()
+    if not token and account_values:
+        token = str(account_values.get("token") or "").strip()
+
+    if not token and api_key:
+        # Direct API channel: derive brand from the authenticated key.
+        cfg = get_brand_config(api_key) or {}
+        if cfg.get("brand_hash"):
+            brand_hash = cfg["brand_hash"]
+            pg_ids = cfg.get("pg_ids", []) or []
+            safe_account = {
+                "brand_name": cfg.get("brand_name", ""),
+                "cities": cfg.get("cities", ""),
+                "areas": cfg.get("areas", ""),
+                "pg_ids": pg_ids,
+                "brand_hash": brand_hash,
+            }
+            set_account_values(user_id, safe_account)
+            if pg_ids:
+                set_whitelabel_pg_ids(user_id, pg_ids)
+            set_user_brand(user_id, brand_hash)
+            add_to_brand_active_users(user_id, brand_hash)
+            return brand_hash, pg_ids
+
+    # Token path (web frontend links) or final default fallback (demo/tokenless).
+    brand_hash, pg_ids, safe_account = resolve_web_brand(brand_token, account_values)
+    if brand_hash:
+        set_account_values(user_id, safe_account)
+        if pg_ids:
+            set_whitelabel_pg_ids(user_id, pg_ids)
+        set_user_brand(user_id, brand_hash)
+        add_to_brand_active_users(user_id, brand_hash)
+    return brand_hash, pg_ids
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
 @router.post("/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key)])
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     """JSON API for Streamlit and other clients."""
     if not req.user_id or not req.message:
         raise HTTPException(status_code=400, detail="user_id and message are required")
 
     check_rate_limit(req.user_id)
 
-    # Set account values if provided + extract brand_hash for user tagging
-    if req.account_values:
-        set_account_values(req.user_id, req.account_values)
-        pg_ids = req.account_values.get("pg_ids", [])
-        if pg_ids:
-            set_whitelabel_pg_ids(req.user_id, pg_ids)
-        # Tag user with brand on first message
-        brand_hash = req.account_values.get("brand_hash", "")
-        if brand_hash:
-            from db.redis_store import set_user_brand, add_to_brand_active_users
-            set_user_brand(req.user_id, brand_hash)
-            add_to_brand_active_users(req.user_id, brand_hash)
+    # Resolve brand identity server-side. Token path → web frontend; API-key path →
+    # direct API callers (e.g. Alliance) with no brand link; default → demo traffic.
+    api_key = request.headers.get("X-API-Key", "")
+    brand_hash, pg_ids_list = _apply_web_brand(req.user_id, req.account_values, req.brand_token, api_key)
 
     response, agent_name, language = await run_pipeline(req.user_id, req.message)
 
-    # Human mode — AI bypassed; admin is responding manually
+    # Human mode — AI bypassed; admin is responding manually. Don't return dead air:
+    # stream a teammate-identity note so the web user sees who is now helping.
     if agent_name == "human":
-        return ChatResponse(response="", agent="human", parts=[], locale=language)
+        _bn = (get_brand_config_by_hash(brand_hash or get_user_brand(req.user_id)) or {}).get("brand_name", "")
+        return ChatResponse(response="", agent="human",
+                            parts=[make_human_handoff_part(_bn, language)], locale=language)
 
-    # Persist to Postgres (brand-scoped)
-    pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
-    from db.redis_store import get_user_brand as _gub_chat
-    _chat_bh = _gub_chat(req.user_id)
+    # Persist to Postgres (brand-scoped). Fall back to any prior brand tag if this
+    # turn carried no token (e.g. resumed conversation).
+    _chat_bh = brand_hash or get_user_brand(req.user_id)
     await pg.insert_message(
         thread_id=req.user_id,
         user_phone=req.user_id,
@@ -129,56 +190,61 @@ async def chat(req: ChatRequest):
         brand_hash=_chat_bh,
     )
 
-    # Parse structured parts for frontend rendering
+    # Generate backend-controlled UI parts FIRST (native carousel from the search signal,
+    # chips, buttons) so the supersession below can gate on whether a native carousel was
+    # ACTUALLY emitted — an honesty early-return (api_error/empty/partial) can suppress it
+    # even when a search ran, and we must never strip the scraped carousel without a replacement.
+    sig = current_signals()
+    ui_parts: list[dict] = []
+    try:
+        # explicit channel egress (passthrough on web; symmetric with the WhatsApp path)
+        ui_parts = adapt(generate_ui_parts(response, agent_name, req.user_id, language, signals=sig), "web")
+    except Exception as e:
+        logger.warning("generate_ui_parts failed: %s", e)
+
+    # Parse structured parts; P4: the native carousel supersedes the regex-scraped one —
+    # drop the scraped one ONLY when a native carousel is actually present (else keep it,
+    # e.g. a same-search "show more" turn renders cards via the legacy scrape path).
     try:
         parts = parse_message_parts(response, req.user_id)
+        parts = drop_scraped_carousel(parts, has_native_carousel=has_native_listing_carousel(ui_parts))
     except Exception as e:
         logger.warning("parse_message_parts failed: %s", e)
         parts = [{"type": "text", "markdown": response}]
 
-    # Generate backend-controlled UI parts (chips, buttons)
-    try:
-        ui_parts = generate_ui_parts(response, agent_name, req.user_id, language)
-        parts.extend(ui_parts)
-    except Exception as e:
-        logger.warning("generate_ui_parts failed: %s", e)
+    parts.extend(ui_parts)
 
     return ChatResponse(response=response, agent=agent_name, parts=parts, locale=language)
 
 
 @router.post("/chat/stream", dependencies=[Depends(verify_api_key)])
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, request: Request):
     """SSE streaming endpoint — streams agent events as they happen."""
     if not req.user_id or not req.message:
         raise HTTPException(status_code=400, detail="user_id and message are required")
 
     check_rate_limit(req.user_id)
 
-    if req.account_values:
-        set_account_values(req.user_id, req.account_values)
-        pg_ids = req.account_values.get("pg_ids", [])
-        if pg_ids:
-            set_whitelabel_pg_ids(req.user_id, pg_ids)
-        # Tag user with brand on first message
-        brand_hash = req.account_values.get("brand_hash", "")
-        if brand_hash:
-            from db.redis_store import set_user_brand, add_to_brand_active_users
-            set_user_brand(req.user_id, brand_hash)
-            add_to_brand_active_users(req.user_id, brand_hash)
+    # Resolve brand identity server-side. Token path → web frontend; API-key path →
+    # direct API callers (e.g. Alliance) with no brand link; default → demo traffic.
+    api_key = request.headers.get("X-API-Key", "")
+    brand_hash, pg_ids_list = _apply_web_brand(req.user_id, req.account_values, req.brand_token, api_key)
 
-    # Resolve brand_hash once for this request (used in save_conversation calls below)
-    from db.redis_store import get_user_brand
-    stream_brand_hash = get_user_brand(req.user_id)
+    # Brand used in save_conversation + PG inserts below; fall back to any prior tag.
+    stream_brand_hash = brand_hash or get_user_brand(req.user_id)
 
-    # Human takeover bypass — save user message and emit empty stream so admin handles it
+    # Human takeover bypass — save user message and stream a teammate-identity note so the
+    # web user isn't met with dead air while the admin handles the conversation manually.
     if get_human_mode(req.user_id, brand_hash=stream_brand_hash):
         conv = get_conversation(req.user_id)
         conv.append({"role": "user", "content": req.message})
         save_conversation(req.user_id, conv, brand_hash=stream_brand_hash)
         language = get_user_language(req.user_id) or "en"
+        _bn = (get_brand_config_by_hash(stream_brand_hash) or {}).get("brand_name", "")
+        _handoff_parts = [make_human_handoff_part(_bn, language)]
 
         async def _human_stream():
-            yield f"event: done\ndata: {json.dumps({'agent': 'human', 'full_response': '', 'parts': [], 'locale': language})}\n\n"
+            yield f"event: done\ndata: {json.dumps({'agent': 'human', 'full_response': '', 'parts': _handoff_parts, 'locale': language})}\n\n"
 
         return StreamingResponse(
             _human_stream(),
@@ -202,7 +268,13 @@ async def chat_stream(req: ChatRequest):
         get_cfg = config_map.get(agent_name, default_agent.get_config)
         cfg = get_cfg(req.user_id, language=language)
 
+    # Drop any stale Stop flag from a prior turn so it can't cancel this fresh run
+    # before the user has interacted (the flag has a 30s TTL on the WhatsApp path).
+    clear_cancel_requested(req.user_id)
+
     async def event_generator():
+        # Clean slate for this turn's truth signals (read at egress to shape honest UI).
+        reset_signals()
         # Emit agent_start so frontend knows which agent is handling + locale
         yield f"event: agent_start\ndata: {json.dumps({'agent': agent_name, 'locale': language})}\n\n"
 
@@ -238,24 +310,29 @@ async def chat_stream(req: ChatRequest):
             # Persist and return
             set_last_agent(req.user_id, agent_name or "system")
             state.conversation.add_assistant_message(req.user_id, full_text, brand_hash=stream_brand_hash)
-            pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
             await pg.insert_message(thread_id=req.user_id, user_phone=req.user_id, message_text=req.message, message_sent_by=1, platform_type="api", is_template=False, pg_ids=pg_ids_list, brand_hash=stream_brand_hash)
             await pg.insert_message(thread_id=req.user_id, user_phone=req.user_id, message_text=full_text, message_sent_by=2, platform_type="api", is_template=False, pg_ids=pg_ids_list, brand_hash=stream_brand_hash)
             return
 
-        # Parse structured parts for frontend rendering
+        # Generate UI parts FIRST so the supersession gates on actual emission (an honesty
+        # early-return can suppress the native carousel even when a search ran — never strip
+        # the scraped carousel without a native replacement). See the non-stream path above.
+        sig = current_signals()
+        ui_parts: list[dict] = []
+        try:
+            ui_parts = adapt(generate_ui_parts(full_text, agent_name, req.user_id, language, signals=sig), "web")
+        except Exception as e:
+            logger.warning("generate_ui_parts failed: %s", e)
+
+        # Parse structured parts; drop the scraped carousel only when a native one is present.
         try:
             parts = parse_message_parts(full_text, req.user_id)
+            parts = drop_scraped_carousel(parts, has_native_carousel=has_native_listing_carousel(ui_parts))
         except Exception as e:
             logger.warning("parse_message_parts failed: %s", e)
             parts = [{"type": "text", "markdown": full_text}]
 
-        # Generate backend-controlled UI parts (chips, buttons)
-        try:
-            ui_parts = generate_ui_parts(full_text, agent_name, req.user_id, language)
-            parts.extend(ui_parts)
-        except Exception as e:
-            logger.warning("generate_ui_parts failed: %s", e)
+        parts.extend(ui_parts)
 
         # Emit final done event with the full assembled response + parts + locale
         yield f"event: done\ndata: {json.dumps({'agent': agent_name, 'full_response': full_text, 'parts': parts, 'locale': language})}\n\n"
@@ -264,7 +341,6 @@ async def chat_stream(req: ChatRequest):
         set_last_agent(req.user_id, agent_name)
         state.conversation.add_assistant_message(req.user_id, full_text, brand_hash=stream_brand_hash)
 
-        pg_ids_list = req.account_values.get("pg_ids", []) if req.account_values else []
         await pg.insert_message(
             thread_id=req.user_id, user_phone=req.user_id,
             message_text=req.message, message_sent_by=1,
@@ -289,12 +365,27 @@ async def chat_stream(req: ChatRequest):
     )
 
 
+@router.post("/chat/stop", dependencies=[Depends(verify_api_key)])
+async def chat_stop(req: StopRequest):
+    """Server-authoritative interrupt.
+
+    The web client also aborts its SSE fetch, but proxy buffering (Render/Nginx)
+    can delay the disconnect from reaching the ASGI server — meanwhile a
+    multi-round tool loop keeps spending. This sets the Phase-C cancel flag so
+    core.claude.run_agent_stream stops at the next tool-round checkpoint,
+    independent of connection teardown.
+    """
+    if not req.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    set_cancel_requested(req.user_id)
+    return {"status": "ok"}
+
+
 @router.post("/feedback", dependencies=[Depends(verify_api_key)])
 async def submit_feedback(req: FeedbackRequest):
     """Record thumbs-up / thumbs-down feedback on a bot response."""
     if req.rating not in ("up", "down"):
         raise HTTPException(status_code=400, detail="rating must be 'up' or 'down'")
-    from db.redis_store import get_user_brand
     save_feedback(req.user_id, req.message_snippet, req.rating, req.agent, brand_hash=get_user_brand(req.user_id))
     return {"status": "ok"}
 

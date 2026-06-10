@@ -1,11 +1,14 @@
 import asyncio
 import hashlib
 import json as _json
+import re
 
 import httpx
 
 from config import settings
 from core.log import get_logger
+from core.osrm import osrm_get
+from core.signals import record_signal
 
 logger = get_logger("tools.search")
 from db.redis_store import (
@@ -15,6 +18,7 @@ from db.redis_store import (
     set_property_id_for_search,
     set_last_search_results,
     save_property_template,
+    set_search_carousel,
     get_whitelabel_pg_ids,
     save_preferences as redis_save_preferences,
     track_funnel,
@@ -23,14 +27,110 @@ from db.redis_store import (
     get_user_memory,
     get_user_brand,
     track_property_event,
+    get_conversation,
     _r as _redis,
 )
-from utils.api import parse_amenities, parse_sharing_types
-from utils.geo import geocode_address
-from utils.scoring import match_score as calc_match_score
+from utils.api import parse_amenities, parse_sharing_types, parse_sharing_types_structured
+from utils.geo import geocode_address, haversine_km
+from utils.scoring import (
+    match_score as calc_match_score,
+    gender_compatible_listing,
+    classify_intent,
+    WEIGHT_PROFILES,
+)
 
 
 SEARCH_CACHE_TTL = 900  # 15 minutes
+
+# R1 — commute-based ranking. Re-rank at most this many top (by area) candidates by
+# proximity to the user's daily destination. Bounds the URL length / compute;
+# properties beyond this window keep their area ranking.
+COMMUTE_RANK_TOPN = 10
+# Try ONE OSRM matrix call for precise drive time, but keep the wait short — if the
+# routing service is slow/down we fall back to straight-line distance instantly
+# rather than dead-air the search (Instant truth). When OSRM is healthy a single
+# matrix call returns well under this.
+COMMUTE_OSRM_TIMEOUT_S = 6
+
+
+def _fmt_rent(raw) -> str:
+    """Format a raw rent value into the '₹9,000/mo' display string the FE card/sheet
+    expect (today's carousel value is prose-derived). Non-numeric input passes through
+    verbatim ('On request')."""
+    s = str(raw).strip()
+    digits = re.sub(r"[^\d]", "", s)
+    return f"₹{int(digits):,}/mo" if digits else s
+
+
+def build_carousel_items(info_list, search_lat, search_lng, limit: int = 5):
+    """Build native property-carousel items (+ map_center) from the structured `info`
+    dicts search builds (the set_property_info_map payload). Byte-compatible with
+    message_parser._build_carousel_parts so the live FE card + detail sheet render
+    identically — but sourced from structured data instead of regex-scraped prose.
+
+    Returns (items, map_center | None). Pure: no Redis/network/LLM.
+    """
+    items = []
+    for info in (info_list or [])[:limit]:
+        item = {
+            "name": info.get("property_name", ""),
+            "location": info.get("property_location", ""),
+            "rent": _fmt_rent(info.get("property_rent", "")),
+            "gender": info.get("pg_available_for", ""),
+            "distance": str(info.get("distance", "") or ""),
+            "image": info.get("property_image", ""),
+            "link": info.get("property_link", ""),
+            "lat": str(info.get("property_lat", "") or ""),
+            "lng": str(info.get("property_long", "") or ""),
+            "score": "",
+            "amenities": info.get("amenities", "") or "",
+        }
+        raw_score = info.get("match_score", "")
+        if raw_score not in ("", None):
+            try:
+                item["score"] = str(round(float(raw_score)))
+            except (ValueError, TypeError):
+                pass  # non-numeric score → leave ""
+        # Sheet-only enrichment (multi-image gallery + structured sharing) — additive,
+        # included ONLY when present (mirrors message_parser._sheet_enrichment, which
+        # returns {} for legacy cache entries so the sheet degrades gracefully).
+        images = info.get("images")
+        if images:
+            item["images"] = images
+        sharing = info.get("sharing_types_list")
+        if sharing:
+            item["sharing"] = sharing
+        # R1 — commute label, shown on the card only when computed this search.
+        # Precise drive time when OSRM answered; honest straight-line km otherwise.
+        cmin = info.get("commute_minutes")
+        ckm = info.get("commute_km")
+        clabel = info.get("commute_label")
+        if clabel and cmin is not None:
+            item["commute"] = f"{int(cmin)} min to {clabel}"
+        elif clabel and ckm is not None:
+            item["commute"] = f"~{ckm} km from {clabel}"
+        items.append(item)
+
+    map_center = None
+    try:
+        if search_lat not in ("", None) and search_lng not in ("", None):
+            map_center = {"lat": float(search_lat), "lng": float(search_lng)}
+    except (ValueError, TypeError):
+        map_center = None
+    if not map_center:
+        coords = []
+        for it in items:
+            try:
+                if it["lat"] and it["lng"]:
+                    coords.append((float(it["lat"]), float(it["lng"])))
+            except (ValueError, TypeError):
+                continue
+        if coords:
+            map_center = {
+                "lat": sum(c[0] for c in coords) / len(coords),
+                "lng": sum(c[1] for c in coords) / len(coords),
+            }
+    return items, map_center
 
 TOOL_SCHEMA = {
     "name": "search_properties",
@@ -118,12 +218,19 @@ async def _geocode_properties(properties: list[dict], limit: int = 5) -> None:
             logger.warning("geocode failed for property %d: %s", i, r)
 
 
-async def _call_search_api(payload: dict) -> list:
-    """Call Rentok search API and return raw properties list. Uses Redis cache."""
-    # Rentok API requires pg_ids to be a non-empty array.
+async def _call_search_api(payload: dict) -> list | None:
+    """Call Rentok search API and return raw properties list. Uses Redis cache.
+
+    Returns None on a *hard failure* (the API could not be reached, raised, or
+    returned an internal error) so callers can tell "we couldn't get an answer"
+    apart from a genuine empty result set. Returns a list (possibly empty) only
+    when the API actually answered.
+    """
+    # Rentok API requires pg_ids to be a non-empty array — without them we
+    # cannot run a meaningful search, so this is a failure, not "no inventory".
     if not payload.get("pg_ids"):
-        logger.warning("pg_ids is empty — API will return no results. Ensure account_values.pg_ids is configured.")
-        return []
+        logger.warning("pg_ids is empty — cannot search. Ensure account_values.pg_ids is configured.")
+        return None
 
     # Check cache first
     cached = _get_search_cache(payload)
@@ -142,7 +249,7 @@ async def _call_search_api(payload: dict) -> list:
         inner = data.get("data", {})
         if inner.get("status") == 500:
             logger.error("API inner error: %s — %s", inner.get("message", ""), inner.get("data", {}).get("error", ""))
-            return []
+            return None
         results = inner.get("data", {}).get("results", [])
         logger.info("search API: %d results", len(results))
 
@@ -153,13 +260,15 @@ async def _call_search_api(payload: dict) -> list:
         return results
     except Exception as e:
         logger.error("search API error: %s", e)
-        return []
+        return None
 
 
-async def _fetch_first_image(client: httpx.AsyncClient, pg_id: str, pg_number: str) -> str:
-    """Fetch the first image URL for a property. Returns '' on any failure."""
+async def _fetch_images(client: httpx.AsyncClient, pg_id: str, pg_number: str) -> list:
+    """Fetch ALL image URLs for a property (same call that backs the single cover —
+    the full list is already returned, we just stop discarding it so the detail sheet
+    can show a real gallery). Returns [] on any failure."""
     if not pg_id or not pg_number:
-        return ""
+        return []
     try:
         resp = await client.post(
             f"{settings.RENTOK_API_BASE_URL}/bookingBot/fetchPropertyImages",
@@ -168,16 +277,20 @@ async def _fetch_first_image(client: httpx.AsyncClient, pg_id: str, pg_number: s
         resp.raise_for_status()
         data = resp.json()
         images = data.get("images", data.get("data", []))
-        if images:
-            first = images[0]
-            return first.get("url", first.get("media_id", "")) if isinstance(first, dict) else str(first)
+        urls = []
+        for im in images:
+            url = im.get("url", im.get("media_id", "")) if isinstance(im, dict) else str(im)
+            if url:
+                urls.append(url)
+        return urls
     except Exception as e:
         logger.debug("image fetch failed for pg_id=%s: %s", pg_id, e)
-    return ""
+    return []
 
 
 async def _enrich_with_images(properties: list, limit: int = 5) -> None:
-    """Concurrently fetch first image for properties missing p_image. Mutates in place."""
+    """Concurrently fetch images for properties missing p_image. Mutates in place:
+    sets p_image (cover = first url) AND _images (full gallery list for the sheet)."""
     targets = []
     for i, p in enumerate(properties[:limit]):
         if not p.get("p_image") and not p.get("image"):
@@ -189,18 +302,202 @@ async def _enrich_with_images(properties: list, limit: int = 5) -> None:
 
     logger.info("image enrichment: fetching images for %d properties", len(targets))
     async with httpx.AsyncClient(timeout=8) as client:
-        tasks = [_fetch_first_image(client, pg_id, pg_num) for _, pg_id, pg_num in targets]
-        urls = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [_fetch_images(client, pg_id, pg_num) for _, pg_id, pg_num in targets]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
     enriched = 0
-    for (idx, _, _), url in zip(targets, urls):
-        if isinstance(url, Exception):
-            logger.warning("image fetch failed for property at idx %d: %s", idx, url)
+    for (idx, _, _), urls in zip(targets, results):
+        if isinstance(urls, Exception):
+            logger.warning("image fetch failed for property at idx %d: %s", idx, urls)
             continue
-        if url:
-            properties[idx]["p_image"] = url
+        if urls:
+            properties[idx]["p_image"] = urls[0]
+            properties[idx]["_images"] = urls
             enriched += 1
     logger.info("image enrichment: %d/%d images found", enriched, len(targets))
+
+
+def _load_property_signals(properties: list) -> dict:
+    """Fetch outcome signals (conversion / no-show) per property — observably.
+
+    The learning loop must never run BLIND AND SILENT. If signals can't be loaded
+    (import missing, Redis outage) we still rank — degrading to no-signal scoring —
+    but we log it loudly so a dark loop is visible instead of swallowed. A missing
+    property id is skipped quietly (not a failure). Returns {property_id: signals}.
+    """
+    try:
+        from db.redis.analytics import get_property_signals
+    except ImportError as e:
+        logger.warning("outcome-signal scoring disabled — get_property_signals unavailable: %s", e)
+        return {}
+
+    out = {}
+    failures = 0
+    for p in properties:
+        pid = p.get("p_property_id", p.get("property_id", ""))
+        if not pid:
+            continue
+        try:
+            sig = get_property_signals(pid)
+            if sig:
+                out[pid] = sig
+        except Exception:
+            failures += 1
+    if failures:
+        logger.warning(
+            "outcome-signal fetch failed for %d/%d properties — ranking those without signals "
+            "(learning loop degraded, not blind-silent)",
+            failures, len(properties),
+        )
+    return out
+
+
+async def _enrich_top_results(properties: list, limit: int = 5) -> None:
+    """Run image enrichment and geocoding concurrently for the top results.
+
+    Both walk the same top-N properties but write disjoint keys (p_image/_images
+    vs lat/lng), so they have no ordering dependency. Overlapping them shaves the
+    slower call's latency off every search. Each function already swallows its own
+    failures, so gather never raises here."""
+    await asyncio.gather(
+        _enrich_with_images(properties, limit=limit),
+        _geocode_properties(properties, limit=limit),
+    )
+
+
+def _short_dest_label(dest: str, max_len: int = 24) -> str:
+    """Trim a commute destination to the leading segment for card display.
+    'Reliance Corporate Park, Navi Mumbai' → 'Reliance Corporate Park'."""
+    head = (dest or "").split(",")[0].strip()
+    if len(head) > max_len:
+        head = head[: max_len - 1].rstrip() + "…"
+    return head
+
+
+def _prop_coords(p: dict) -> tuple:
+    """Pull (lat, lng) floats from a property using the same key fallbacks the
+    results loop uses (API fields → geocoded). Returns (None, None) when absent."""
+    plat = (p.get("p_latitude") or p.get("p_lat") or p.get("p_pg_latitude")
+            or p.get("latitude") or p.get("lat") or p.get("_geocoded_lat") or "")
+    plng = (p.get("p_longitude") or p.get("p_long") or p.get("p_pg_longitude")
+            or p.get("longitude") or p.get("long") or p.get("lng")
+            or p.get("_geocoded_lng") or "")
+    try:
+        if plat and plng:
+            return float(plat), float(plng)
+    except (ValueError, TypeError):
+        pass
+    return None, None
+
+
+async def _compute_commute_minutes(properties: list, destination: str,
+                                   limit: int = COMMUTE_RANK_TOPN) -> None:
+    """R1 — rank the top-N candidates by proximity to the user's daily destination.
+
+    When the user gave a destination (office/college), this fills, for each top
+    candidate:
+      - `_commute_km`  : straight-line distance to the destination (ALWAYS, instant) —
+                          a reliable office-proximity signal with no infra dependency.
+      - `_commute_min` : real driving minutes via ONE OSRM table call (source = dest,
+                          destinations = properties), set ONLY when the routing
+                          service responds in time. This UPGRADES the km signal to a
+                          precise one. We never invent a drive time we didn't measure.
+
+    Fully graceful: a vague/empty destination or one that won't geocode, or
+    properties without coordinates, simply leave the properties untouched so ranking
+    degrades to search-pin distance. A slow/down OSRM degrades only the *label*
+    (km instead of minutes), not the ranking. It NEVER raises.
+    """
+    # Reuse estimate_commute's vague-destination guard so we never geocode "office".
+    from tools.broker.landmarks import _VAGUE_DESTINATIONS
+
+    dest = (destination or "").strip()
+    if not dest or dest.lower() in _VAGUE_DESTINATIONS:
+        return
+
+    try:
+        dest_lat, dest_lng = await geocode_address(dest)
+    except Exception as e:
+        logger.warning("commute: destination geocode failed for %r: %s", dest, e)
+        return
+    if not dest_lat or not dest_lng:
+        logger.info("commute: could not geocode destination %r — ranking by area", dest)
+        return
+    dest_lat, dest_lng = float(dest_lat), float(dest_lng)
+
+    candidates = properties[:limit]
+    # Fill in any missing property coordinates (concurrent) so commute can cover the
+    # whole window, not just the few the search API returned with coords.
+    try:
+        await _geocode_properties(candidates, limit=limit)
+    except Exception as e:
+        logger.debug("commute: candidate geocoding hiccup (continuing): %s", e)
+
+    targets = []  # (property, lat, lng)
+    for p in candidates:
+        plat, plng = _prop_coords(p)
+        if plat is not None and plng is not None:
+            targets.append((p, plat, plng))
+    if not targets:
+        logger.info("commute: no top-%d candidates have coordinates — ranking by area", limit)
+        return
+
+    # Straight-line distance — always available, instant. This is the office-proximity
+    # ranking signal even when the routing service is unreachable.
+    for p, plat, plng in targets:
+        p["_commute_km"] = round(haversine_km(dest_lat, dest_lng, plat, plng), 1)
+
+    # Upgrade to precise driving time via ONE OSRM table call (index 0 = destination,
+    # 1..N = properties), through the circuit breaker — when OSRM is down it returns
+    # None instantly (no per-search timeout tax) and we keep the km signal.
+    coord_str = f"{dest_lng},{dest_lat}" + "".join(
+        f";{lng},{lat}" for _, lat, lng in targets
+    )
+    data = await osrm_get(
+        f"https://maps.rentok.com/table/v1/driving/{coord_str}",
+        params={"sources": "0", "api_key": settings.OSRM_API_KEY},
+        timeout=COMMUTE_OSRM_TIMEOUT_S,
+    )
+    if not data:
+        logger.info("commute: OSRM unavailable — ranking by straight-line distance")
+        return
+
+    durations = (data or {}).get("durations") or [[]]
+    row = durations[0] if durations else []
+    assigned = 0
+    for i, (p, _, _) in enumerate(targets, start=1):
+        if i < len(row) and row[i] is not None:
+            try:
+                p["_commute_min"] = int(round(float(row[i]) / 60))
+                assigned += 1
+            except (ValueError, TypeError):
+                continue
+    logger.info("commute: precise drive time for %d/%d candidates (dest=%r)",
+                assigned, len(targets), dest)
+
+
+def _last_user_message(user_id: str) -> str:
+    """Best-effort read of the user's most recent message text from conversation
+    history (already persisted by the pipeline before the agent runs). Used only
+    to flavour R8 intent classification; any failure → "" → balanced ranking."""
+    try:
+        conv = get_conversation(user_id)
+        for msg in reversed(conv):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                for blk in content:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        return blk.get("text", "")
+                    if isinstance(blk, str):
+                        return blk
+            return ""
+    except Exception:
+        pass
+    return ""
 
 
 async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -> str:
@@ -215,7 +512,6 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     property_type = prefs.get("property_type")
     unit_types = prefs.get("unit_types_available")
     pg_available_for = prefs.get("pg_available_for")
-    sharing_types = prefs.get("sharing_types_enabled")
     radius = prefs.get("radius", 20000)
 
     if radius_flag:
@@ -247,12 +543,14 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     }
     if min_budget:
         payload["rent_starts_from"] = min_budget
-    if unit_types:
-        payload["unit_types_available"] = unit_types
-    if pg_available_for and pg_available_for in ["All Boys", "All Girls"]:
-        payload["pg_available_for"] = pg_available_for
-    if sharing_types:
-        payload["sharing_type_enabled"] = sharing_types
+    # NOTE: `unit_types_available`, `pg_available_for` and `sharing_types_enabled` are NOT
+    # sent to the search API. Ground truth (RentOk backend): these are free-text, per-property
+    # enums — pg_available_for is an exact IN-match on stored phrases (e.g. "Male & Female"),
+    # unit_types_available is an array-overlap on uppercase tokens (e.g. SINGLESHARING).
+    # Client-guessed values like "All Boys" / "double sharing" never match → silent 0 results,
+    # and they over-exclude the predominantly "Any" co-living inventory. We instead return the
+    # full candidate set and rank/filter post-search (gender is hard-filtered below via
+    # gender_compatible; unit/sharing type rank via utils/scoring.py).
 
     logger.debug("search payload: %s", payload)
 
@@ -260,6 +558,15 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
     MIN_RESULTS_THRESHOLD = 5
 
     properties = await _call_search_api(payload)
+    # None ⇒ hard failure (couldn't reach the listings API), NOT "no inventory".
+    # Surfacing a false "nothing available here" would be lying to the user, so we
+    # tell the truth: the problem is on our side and they should retry.
+    if properties is None:
+        return (
+            "I'm having trouble reaching our property listings right now — "
+            "this is a temporary issue on our end, not a lack of options. "
+            "Please try again in a moment."
+        )
     relaxed_note = ""
     logger.info("initial query returned %d results", len(properties))
 
@@ -271,10 +578,11 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
             "rent_ends_to": max(max_budget * 3, 300000) if max_budget else 10000000,
             "pg_ids": pg_ids,
         }
-        if unit_types:
-            r1_payload["unit_types_available"] = unit_types
+        # unit_types_available deliberately omitted — see note on the base payload above.
         logger.debug("relaxation round 1 payload: %s", r1_payload)
-        r1_results = await _call_search_api(r1_payload)
+        # A relaxation round that hard-fails just yields no extra results — we
+        # already have the base set, so treat None as an empty top-up here.
+        r1_results = await _call_search_api(r1_payload) or []
         logger.info("relaxation round 1 returned %d results", len(r1_results))
 
         if len(r1_results) > len(properties):
@@ -296,7 +604,7 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
             "pg_ids": pg_ids,
         }
         logger.debug("relaxation round 2 payload: %s", r2_payload)
-        r2_results = await _call_search_api(r2_payload)
+        r2_results = await _call_search_api(r2_payload) or []
         logger.info("relaxation round 2 returned %d results", len(r2_results))
 
         if len(r2_results) > len(properties):
@@ -310,15 +618,14 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         logger.info("after round 2 merge: %d total", len(properties))
 
     if not properties:
+        record_signal(search_ran=True, result_count=0)
         return "No properties are currently available in this region."
 
     logger.info("found %d properties", len(properties))
 
-    # Enrich top results with images from dedicated images API
-    await _enrich_with_images(properties, limit=5)
-
-    # Geocode top properties to get lat/lng for map view
-    await _geocode_properties(properties, limit=5)
+    # Enrich top results: images + geocoding are independent I/O over the same
+    # top-N (disjoint keys), so run them concurrently instead of back-to-back.
+    await _enrich_top_results(properties, limit=5)
 
     # Re-score with custom scoring (weighted amenities + deal-breaker penalties)
     user_mem = get_user_memory(user_id)
@@ -332,13 +639,18 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         "property_type": property_type or "",
         "pg_available_for": pg_available_for or "",
     }
-    # Load property outcome signals for scoring (Sprint 5)
-    try:
-        from db.redis.analytics import get_property_signals
-    except ImportError:
-        get_property_signals = None
+    # Load property outcome signals (conversion/no-show) — observably, never blind.
+    prop_signals = _load_property_signals(properties)
 
-    for p in properties:
+    # R8 — intent-tuned ranking. Pick a weight profile from the user's deliberate
+    # prefs + their CURRENT message (read from conversation history; the pipeline
+    # persists it before the agent runs). Absent/ambiguous intent → None → the
+    # `balanced` profile → byte-identical to pre-R8 scoring. Observable, never blind.
+    intent = classify_intent(prefs, _last_user_message(user_id))
+    intent_weights = WEIGHT_PROFILES.get(intent) if intent else None
+    logger.info("ranking intent profile: %s", intent or "balanced")
+
+    def _score(p: dict, commute_aware: bool = False) -> float:
         prop_data = {
             "rent": p.get("p_rent_starts_from", p.get("rent", 0)),
             "distance": p.get("p_distance", p.get("distance")),
@@ -346,19 +658,77 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
             "property_type": p.get("p_property_type", ""),
             "pg_available_for": p.get("p_pg_available_for", ""),
         }
-        # Fetch outcome signals for this property (fire-and-forget on failure)
-        signals = {}
-        if get_property_signals:
-            try:
-                pid = p.get("p_property_id", p.get("property_id", ""))
-                if pid:
-                    signals = get_property_signals(pid)
-            except Exception:
-                pass
-        p["_custom_score"] = calc_match_score(prop_data, scoring_prefs, deal_breakers=deal_breakers, property_signals=signals)
+        if commute_aware:
+            # None when this property had no commute computed → match_score falls
+            # back to the distance term for it (mixed windows rank consistently).
+            # Precise minutes when OSRM answered; else straight-line km (both are
+            # office-proximity — the R1 signal).
+            prop_data["commute_minutes"] = p.get("_commute_min")
+            prop_data["commute_km"] = p.get("_commute_km")
+        pid = p.get("p_property_id", p.get("property_id", ""))
+        signals = prop_signals.get(pid, {})
+        return calc_match_score(prop_data, scoring_prefs,
+                                deal_breakers=deal_breakers, property_signals=signals,
+                                weights=intent_weights)
+
+    for p in properties:
+        p["_custom_score"] = _score(p)
 
     # Sort by custom score (descending) to surface best matches first
     properties.sort(key=lambda p: p.get("_custom_score", 0), reverse=True)
+
+    # Gender is a HARD constraint — a renter physically cannot book an
+    # opposite-gender-only PG. Unlike amenities (soft, ranked above), exclude
+    # incompatible inventory rather than surfacing unbookable options ranked a
+    # few points lower. "Any"/co-living and unknown values stay permissive, so the
+    # predominantly "Any"-tagged stock is never over-filtered.
+    # NOTE: the structured p_pg_available_for tag is unreliable on this inventory —
+    # girls-only PGs (e.g. "... KURLA GIRL'S") are routinely tagged "Any" — so the
+    # filter also reads the deliberate GIRL'S/BOY'S gender label in the property
+    # NAME, which overrides the tag. Co-living "BOY'S/GIRL'S" names stay bookable.
+    if pg_available_for:
+        compatible = [p for p in properties
+                      if gender_compatible_listing(pg_available_for,
+                                                   p.get("p_pg_available_for", ""),
+                                                   p.get("p_pg_name", ""))]
+        removed = len(properties) - len(compatible)
+        if compatible:
+            if removed:
+                logger.info("gender filter removed %d incompatible properties (pref=%s)",
+                            removed, pg_available_for)
+            properties = compatible
+        elif removed:
+            # Every candidate is opposite-gender → be honest instead of padding
+            # the list with options the user cannot actually book.
+            logger.info("gender filter removed ALL %d properties (pref=%s)",
+                        removed, pg_available_for)
+            record_signal(search_ran=True, result_count=0)
+            return (
+                f"I couldn't find any properties matching your requirement "
+                f"({pg_available_for}) in this area — the available options here "
+                f"are for a different gender. Want me to widen the search or try a nearby area?"
+            )
+
+    # R1 — commute-based re-rank. If the user told us their daily destination
+    # (office/college), re-rank the top (bookable) candidates by REAL driving time
+    # to that place instead of crow-flies distance from the searched area. This is
+    # the marquee right-first signal. Optional: with no destination the block is
+    # skipped entirely (no extra calls), so non-commute users see UNCHANGED ranking.
+    commute_dest = (prefs.get("commute_from") or "").strip()
+    commute_label = ""
+    if commute_dest:
+        await _compute_commute_minutes(properties, commute_dest, limit=COMMUTE_RANK_TOPN)
+        if any(p.get("_commute_min") is not None or p.get("_commute_km") is not None
+               for p in properties):
+            for p in properties:
+                p["_custom_score"] = _score(p, commute_aware=True)
+            properties.sort(key=lambda p: p.get("_custom_score", 0), reverse=True)
+            commute_label = _short_dest_label(commute_dest)
+            logger.info("commute re-rank applied (dest=%r)", commute_dest)
+
+    # Final result set resolved (post-score, post gender hard-filter) — record
+    # the real count so egress can shape honest UI (scarcity only from truth).
+    record_signal(search_ran=True, result_count=len(properties))
 
     existing_map = get_property_info_map(user_id)
     # Build index for fast dedup by prop_id → position in existing_map
@@ -393,7 +763,10 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         long_val = (p.get("p_longitude") or p.get("p_long") or p.get("p_pg_longitude")
                     or p.get("longitude") or p.get("long") or p.get("lng")
                     or p.get("_geocoded_lng") or "")
-        phone = p.get("p_phone_number", "")
+        # Property contact lives in p_personal_contact; p_phone_number is usually
+        # absent. The shortlist API requires a non-empty property_contact, so prefer
+        # the populated field. Server-side only — never rendered to users.
+        phone = p.get("p_personal_contact") or p.get("p_phone_number") or ""
         min_token = p.get("p_min_token_amount", 1000)
         microsite_url = p.get("p_microsite_url", p.get("microsite_url", ""))
         match_score = p.get("_custom_score", p.get("p_match_score", p.get("match_score", "")))
@@ -401,6 +774,11 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         # no downstream tool needs to know the raw API shape.
         amenities_raw = parse_amenities(p.get("p_common_amenities", p.get("p_amenities", "")))
         sharing_types_data = parse_sharing_types(p.get("p_sharing_types_enabled", []))
+        # Structured sharing + full image list power the detail sheet (§3.2). The sheet
+        # needs an ARRAY of {label,price} (the display string above renders blank there)
+        # and the full gallery, not just the cover. Both come from data already fetched.
+        sharing_types_struct = parse_sharing_types_structured(p.get("p_sharing_types_enabled", []))
+        images_list = p.get("_images") or ([image] if image else [])
 
         info = {
             "property_name": property_name,
@@ -425,7 +803,21 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
             "property_min_token_amount": min_token,    # alias for payment tool
             "amenities": amenities_raw,
             "sharing_types": sharing_types_data,
+            "sharing_types_list": sharing_types_struct,  # structured for the detail sheet
+            "images": images_list,                       # full gallery for the detail sheet
         }
+        # R1 — carry commute proximity so the card can show it. Additive: present only
+        # when computed this search. Precise minutes (OSRM) → "X min to <dest>";
+        # straight-line km fallback → "~X.X km from <dest>" (honest, never a faked time).
+        if commute_label:
+            _cmin = p.get("_commute_min")
+            _ckm = p.get("_commute_km")
+            if _cmin is not None:
+                info["commute_minutes"] = _cmin
+                info["commute_label"] = commute_label
+            elif _ckm is not None:
+                info["commute_km"] = _ckm
+                info["commute_label"] = commute_label
         # Replace old entry for same property (dedup) or append new
         if prop_id and prop_id in _existing_idx:
             existing_map[_existing_idx[prop_id]] = info
@@ -443,6 +835,18 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         )
 
     set_property_info_map(user_id, existing_map)
+
+    # P4: record the native carousel on the signal slate so egress emits a structured
+    # carousel unit that SUPERSEDES the regex-scraped one (stripped in chat.py). Built
+    # from the same top-5 property_template WhatsApp shows; byte-compatible with the FE
+    # card + detail sheet, but sourced from structured data instead of the broker's prose.
+    # Build the full ranked carousel once: top-5 go on the signal (this turn's native
+    # carousel); the full list (up to 15) is cached so show_more_properties can page the
+    # next batch NATIVELY (no prose scraping). Caching resets the paging cursor to 5.
+    _full_items, _carousel_center = build_carousel_items(property_template, lat, lng, limit=15)
+    if _full_items:
+        record_signal(carousel_items=_full_items[:5], carousel_map_center=_carousel_center)
+    set_search_carousel(user_id, _full_items, _carousel_center)
 
     # Save pg_ids for KB doc injection in broker agent (uses brand-config pg_id, not Rentok UUID)
     kb_ids = [info["pg_id"] for info in property_template[:5] if info.get("pg_id")]
@@ -481,4 +885,8 @@ async def search_properties(user_id: str, radius_flag: bool = False, **kwargs) -
         last_search_budget=budget_str,
     )
 
-    return f"{relaxed_note}Found {len(properties)} properties. Here are the results:\n" + "\n".join(results)
+    from core.untrusted import fence
+    return (
+        f"{relaxed_note}Found {len(properties)} properties. Here are the results:\n"
+        + fence("\n".join(results), "property listing data from the Rentok API")
+    )

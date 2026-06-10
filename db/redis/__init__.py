@@ -99,6 +99,10 @@ from db.redis.property import (  # noqa: F401
     save_property_template,
     get_property_template,
     clear_property_template,
+    set_search_carousel,
+    get_search_carousel,
+    get_carousel_cursor,
+    set_carousel_cursor,
     set_property_images_id,
     get_property_images_id,
     clear_property_images_id,
@@ -146,6 +150,9 @@ from db.redis.analytics import (  # noqa: F401
     set_response,
     get_response,
     FUNNEL_STAGES,
+    # Daily quality aggregate (trend sparkline + avg KPI)
+    track_daily_quality,
+    get_quality_trend,
 )
 
 # Payment domain
@@ -167,10 +174,16 @@ from db.redis.brand import (  # noqa: F401
     set_brand_config,
     get_brand_wa_config,
     get_brand_by_token,
+    get_default_brand_config,
     # Per-brand feature flags
     get_brand_flags,
     set_brand_flag,
     get_effective_flags,
+    # Per-brand model routing overrides
+    get_model_override,
+    set_model_override,
+    clear_model_override,
+    get_all_model_overrides,
 )
 
 # Admin domain
@@ -197,4 +210,28 @@ from db.redis.quality import (  # noqa: F401
     save_conversation_quality,
     get_conversation_quality,
     update_conversation_quality,
+)
+
+# Idempotency domain (Wave 3) — burst-dedup for write-path tools
+from db.redis.idempotency import (  # noqa: F401
+    idem_begin,
+    idem_complete,
+    idem_release,
+    idem_clear,
+)
+
+# Eval domain — CI stress-test result storage
+from db.redis.eval import (  # noqa: F401
+    save_eval_run,
+    get_eval_last_run,
+    get_eval_history,
+)
+
+# Self-serve brand accounts domain
+from db.redis.accounts import (  # noqa: F401
+    get_account,
+    save_account,
+    account_exists,
+    set_email_verify_token,
+    consume_email_verify_token,
 )

@@ -17,8 +17,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 import core.state as state
-from core.claude import AnthropicEngine
 from core.conversation import ConversationManager
+from core.model_router import ModelRouter
 from core.log import get_logger
 from core.rate_limiter import RateLimitExceeded
 from core.tool_executor import ToolExecutor
@@ -80,6 +80,7 @@ def _seed_brand_configs():
 async def lifespan(app: FastAPI):
     # Startup
     await pg.init_pool()
+    await pg.create_booking_messages_table()
     await pg.create_property_documents_table()
     await pg.enable_pgvector()  # Semantic KB — pgvector extension + embedding columns
     await pg.create_leads_table()
@@ -90,7 +91,7 @@ async def lifespan(app: FastAPI):
     executor = ToolExecutor()
     executor.register_many(get_all_handlers())
 
-    state.engine = AnthropicEngine(tool_executor=executor)
+    state.engine = ModelRouter(tool_executor=executor)
     state.conversation = ConversationManager()
 
     # Auto-seed brand configs for known brands (idempotent)

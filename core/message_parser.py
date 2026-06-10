@@ -17,6 +17,42 @@ from db.redis_store import get_property_info_map, get_preferences
 
 logger = get_logger("core.message_parser")
 
+# ── Raw-media-URL safety net ────────────────────────────────────────────
+# When the broker drifts off the listing format (Haiku variance) and no
+# carousel detector matches, the reply — including any raw "Image: <cdn-url>"
+# lines — would otherwise render verbatim as plain text. Strip those so a user
+# can NEVER see a raw azureedge/blob .mp4/.jpg URL in chat. Applied ONLY to
+# leftover text parts (after block extraction, which consumes Image: lines into
+# the card), so legitimate non-media links in prose are preserved.
+_RAW_MEDIA_LINE = re.compile(
+    r"(?im)^[ \t]*(?:image|video|photo|link)s?\s*:\s*https?://\S+[ \t]*$"
+)
+_BARE_MEDIA_URL = re.compile(
+    r"(?i)\bhttps?://\S*(?:azureedge\.net|blob\.core\.windows\.net|rentok-?storage)\S*"
+)
+
+
+def _strip_raw_media_urls(md: str) -> str:
+    """Remove leaked 'Image:/Link: <url>' lines and bare CDN media URLs from text."""
+    if not md:
+        return md
+    md = _RAW_MEDIA_LINE.sub("", md)
+    md = _BARE_MEDIA_URL.sub("", md)
+    md = re.sub(r"\n{3,}", "\n\n", md)
+    return md.strip()
+
+
+def drop_scraped_carousel(parts: list[dict], has_native_carousel: bool) -> list[dict]:
+    """P4 supersession rule: when a structured (native) property carousel is emitted
+    for this turn (search ran → carousel_items on the signal), drop the regex-scraped
+    `property_carousel` part so exactly ONE carousel renders — structured supersedes
+    scraped. When no native carousel is emitted (e.g. a same-search 'show more' turn
+    with no fresh search signal), the scraped carousel is the sole source and is kept.
+    Surrounding text/comparison parts are always preserved."""
+    if not has_native_carousel:
+        return parts
+    return [p for p in parts if p.get("type") != "property_carousel"]
+
 
 def parse_message_parts(markdown: str, user_id: str) -> list[dict]:
     """Parse agent markdown into structured parts[].
@@ -28,19 +64,24 @@ def parse_message_parts(markdown: str, user_id: str) -> list[dict]:
     if not markdown or not markdown.strip():
         return [{"type": "text", "markdown": markdown or ""}]
 
-    # 1. Comparison table (pipe-delimited lines ≥ 3)
-    pipe_lines = [l for l in markdown.split("\n") if re.search(r"\|.*\|", l)]
-    if len(pipe_lines) >= 3:
-        parts = _parse_comparison_segments(markdown)
-        if parts:
-            return parts
+    # Comparison is emitted natively (D2 signal → generate_ui_parts); the legacy
+    # pipe-table prose-scraper was removed. A markdown table now renders as text.
 
-    # 2. Compact property format: **N. Name**\n📍 ...
+    # 1. Compact property format: **N. Name**\n📍 ...
     compact_matches = list(re.finditer(
         r"\*\*(\d+)\.\s+(.+?)\*\*\s*\n(📍.+)", markdown
     ))
     if compact_matches:
         return _build_carousel_parts(markdown, compact_matches, False, user_id)
+
+    # 2b. Tolerant numbered format — Haiku drift: the number may sit OUTSIDE the
+    #     bold ("1. **Name**") or the name may be unbolded ("1. Name"), as long as
+    #     a 📍 meta line follows. Superset of (2); placed after so (2) wins first.
+    tolerant_matches = list(re.finditer(
+        r"(?:\*\*)?\s*(\d+)\.\s+(?:\*\*)?(.+?)(?:\*\*)?\s*\n\s*(📍[^\n]+)", markdown
+    ))
+    if tolerant_matches:
+        return _build_carousel_parts(markdown, tolerant_matches, False, user_id)
 
     # 3. Legacy bold format: **N. Name** — ₹X
     legacy_matches = list(re.finditer(
@@ -66,85 +107,9 @@ def parse_message_parts(markdown: str, user_id: str) -> list[dict]:
         enrichment = _enrich_h3_matches(markdown, keycap_matches)
         return _build_carousel_parts(markdown, keycap_matches, True, user_id, enrichment)
 
-    # 6. Default — single text part
-    return [{"type": "text", "markdown": markdown}]
-
-
-# ------------------------------------------------------------------
-# Comparison table helpers
-# ------------------------------------------------------------------
-
-def _parse_comparison_segments(text: str) -> list[dict]:
-    """Split text into alternating text / table segments."""
-    lines = text.split("\n")
-    segments = []
-    buf, table_buf, in_table = [], [], False
-
-    for line in lines:
-        if re.search(r"\|.*\|", line):
-            if not in_table and buf:
-                segments.append(("text", "\n".join(buf)))
-                buf = []
-            in_table = True
-            table_buf.append(line)
-        else:
-            if in_table:
-                if len(table_buf) >= 3:
-                    segments.append(("table", table_buf))
-                else:
-                    buf.extend(table_buf)
-                table_buf = []
-                in_table = False
-            buf.append(line)
-
-    if in_table and len(table_buf) >= 3:
-        segments.append(("table", table_buf))
-    elif table_buf:
-        buf.extend(table_buf)
-    if buf:
-        segments.append(("text", "\n".join(buf)))
-
-    parts = []
-    for seg_type, content in segments:
-        if seg_type == "table":
-            parts.append(_table_segment_to_part(content))
-        else:
-            stripped = content.strip() if isinstance(content, str) else content
-            if stripped:
-                parts.append({"type": "text", "markdown": stripped})
-    return parts
-
-
-def _table_segment_to_part(lines: list[str]) -> dict:
-    """Convert pipe-table lines into a comparison_table part."""
-    # Filter out separator lines (---|---|---)
-    data_lines = [l for l in lines if not re.match(r"^\s*\|?\s*[-:]+\s*[\|-]", l)]
-    if len(data_lines) < 2:
-        return {"type": "text", "markdown": "\n".join(lines)}
-
-    def parse_row(line):
-        return [c.strip() for c in line.split("|") if c.strip()]
-
-    headers = parse_row(data_lines[0])
-    rows = [parse_row(l) for l in data_lines[1:]]
-
-    # Detect winner row
-    winner_re = re.compile(r"🏆|best pick|pick:|recommended", re.IGNORECASE)
-    winner = None
-    body_rows = []
-    for r in rows:
-        joined = " ".join(r)
-        if winner_re.search(joined):
-            winner = re.sub(r"🏆|best pick:|pick:", "", joined, flags=re.IGNORECASE).strip()
-        else:
-            body_rows.append(r)
-
-    return {
-        "type": "comparison_table",
-        "headers": headers,
-        "rows": body_rows,
-        "winner": winner,
-    }
+    # 6. Default — single text part (strip any raw media URLs the broker leaked
+    #    into prose when it drifted off every listing format).
+    return [{"type": "text", "markdown": _strip_raw_media_urls(markdown)}]
 
 
 # ------------------------------------------------------------------
@@ -290,6 +255,9 @@ def _build_carousel_parts(
             "lng": lng,
             "score": score,
             "amenities": amenities,
+            # Sheet-only richness (multi-image gallery + structured sharing) — additive,
+            # rides on the stashed item the detail sheet composes from.
+            **_sheet_enrichment(redis_info),
         })
 
     # Text before first match
@@ -331,14 +299,38 @@ def _build_carousel_parts(
 
     parts = []
     if pre_text:
-        parts.append({"type": "text", "markdown": pre_text})
+        pre_text = _strip_raw_media_urls(pre_text)
+        if pre_text:
+            parts.append({"type": "text", "markdown": pre_text})
     carousel_part = {"type": "property_carousel", "properties": properties}
     if map_center:
         carousel_part["map_center"] = map_center
     parts.append(carousel_part)
     if post_text:
-        parts.append({"type": "text", "markdown": post_text})
+        post_text = _strip_raw_media_urls(post_text)
+        if post_text:
+            parts.append({"type": "text", "markdown": post_text})
     return parts
+
+
+def _sheet_enrichment(redis_info: dict | None) -> dict:
+    """Sheet-only enrichment fields lifted from the cached property info_map so the
+    detail sheet (eazypg-chat property-sheet.js composePropertySheet) renders a
+    multi-image gallery + a 'Choose sharing' section. These keys ride on the carousel
+    item the frontend stashes, so they reach the sheet verbatim without changing the
+    lean card view-model. Purely additive: returns {} for legacy cache entries that
+    predate these keys, so the sheet degrades gracefully (sections hidden, no shells).
+    """
+    if not redis_info:
+        return {}
+    out = {}
+    images = redis_info.get("images")
+    if images:
+        out["images"] = images
+    sharing = redis_info.get("sharing_types_list")
+    if sharing:
+        out["sharing"] = sharing
+    return out
 
 
 def _find_in_info_map(name: str, info_map: list) -> dict | None:

@@ -13,6 +13,7 @@ Routes:
   GET    /admin/leads
   GET    /admin/flags
   POST   /admin/flags
+  POST   /admin/login
   GET    /admin/brand-config
   POST   /admin/brand-config
   POST   /admin/broadcast
@@ -21,6 +22,7 @@ Routes:
   POST   /admin/properties/{prop_id}/documents
   DELETE /admin/properties/{prop_id}/documents/{doc_id}
   POST   /admin/backfill-brands
+  POST   /admin/backfill-message-brand-hash
   POST   /admin/leads/{uid}/outcome
 """
 
@@ -73,6 +75,7 @@ from db.redis_store import (
     track_property_event,
     track_funnel,
     update_user_memory,
+    get_quality_trend,
 )
 
 logger = get_logger("routers.admin")
@@ -101,7 +104,7 @@ def _require_ownership(uid: str, brand_hash: str) -> None:
     users who haven't been backfilled yet.
     """
     user_brand = get_user_brand(uid)
-    if user_brand and user_brand != brand_hash:
+    if not user_brand or user_brand != brand_hash:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
 
@@ -179,7 +182,7 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
     total_messages = sum(message_volume.values())
     active_users_count = get_brand_active_users_count(brand_hash)
     visits_booked = funnel_totals.get("visit", 0)
-    new_leads = funnel_totals.get("search", 0)  # anyone who ran a search = engaged lead
+    new_leads = funnel_totals.get("search", 0)  # users who ran a property search (top-of-funnel)
 
     # Chronologically sorted daily message counts for the chart
     daily = [{"date": d, "count": c} for d, c in sorted(message_volume.items())]
@@ -250,15 +253,19 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
     except Exception as e:
         logger.warning("property performance aggregation failed: %s", e)
 
-    # --- Quality distribution: scan brand users (Sprint 4) ---
+    # --- Quality distribution + avg score: scan brand users (Sprint 4) ---
     quality_distribution = {"0-25": 0, "25-50": 0, "50-75": 0, "75-100": 0}
+    avg_quality_score = None
     try:
         from db.redis.quality import get_conversation_quality
         q_uids = get_brand_active_users(brand_hash, offset=0, limit=500)
+        q_sum, q_count = 0, 0
         for q_uid in q_uids:
             qd = get_conversation_quality(q_uid)
             qs = qd.get("score")
             if qs is not None:
+                q_sum += qs
+                q_count += 1
                 if qs < 25:
                     quality_distribution["0-25"] += 1
                 elif qs < 50:
@@ -267,6 +274,8 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
                     quality_distribution["50-75"] += 1
                 else:
                     quality_distribution["75-100"] += 1
+        if q_count:
+            avg_quality_score = round(q_sum / q_count, 1)
     except Exception as e:
         logger.warning("quality distribution scan failed: %s", e)
 
@@ -276,6 +285,32 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
         error_summary = await pg.get_error_summary(brand_hash=brand_hash, days=days)
     except Exception as e:
         logger.warning("error summary failed: %s", e)
+
+    # --- Derived KPIs ---
+    conversion_rate = round((visits_booked / new_leads) * 100, 1) if new_leads else None
+
+    # --- Quality trend (7-day sparkline) ---
+    quality_trend = []
+    try:
+        quality_trend = get_quality_trend(brand_hash=brand_hash, days=7)
+    except Exception as e:
+        logger.warning("quality trend failed: %s", e)
+
+    # --- Cost spike detection: flag if today > 2× 7-day avg ---
+    cost_spike = None
+    try:
+        today_cost = get_daily_cost(day=today.isoformat(), brand_hash=brand_hash) or 0.0
+        past_costs = [
+            get_daily_cost(day=(today - timedelta(days=i)).isoformat(), brand_hash=brand_hash) or 0.0
+            for i in range(1, 8)
+        ]
+        avg_7d = sum(past_costs) / 7
+        today_inr = round(today_cost * USD_TO_INR, 2)
+        avg_7d_inr = round(avg_7d * USD_TO_INR, 2)
+        if avg_7d > 0 and today_cost > avg_7d * 2:
+            cost_spike = {"today_inr": today_inr, "avg_7d_inr": avg_7d_inr}
+    except Exception as e:
+        logger.warning("cost spike check failed: %s", e)
 
     return {
         # KPI cards
@@ -299,10 +334,15 @@ async def admin_analytics(days: int = 7, brand_hash: str = Depends(require_admin
         # Quality + errors (Sprint 4)
         "quality_distribution": quality_distribution,
         "error_summary": error_summary,
+        # Analytics improvements
+        "avg_quality_score": avg_quality_score,
+        "conversion_rate": conversion_rate,
+        "quality_trend": quality_trend,
+        "cost_spike": cost_spike,
         # Extended data (kept for backward compat)
         "funnel": funnel_totals,
         "feedback": feedback,
-        "messages": message_volume,
+        "messages": daily,
         "rate_limits": rate_limits,
         "meta": {
             "days": days,
@@ -548,7 +588,7 @@ async def admin_command_center(brand_hash: str = Depends(require_admin_brand_key
 # ---------------------------------------------------------------------------
 
 def _lead_row(uid: str) -> dict:
-    """Build the full 25-field lead dict for a single uid. DRY helper used by both endpoints."""
+    """Build the full lead dict for a single uid. DRY helper used by both endpoints."""
     mem   = get_user_memory(uid)
     prefs = get_preferences(uid)
     phone = get_user_phone(uid) or ""
@@ -558,6 +598,22 @@ def _lead_row(uid: str) -> dict:
     # Budget: prefer structured prefs, fall back to memory strings
     budget_min = prefs.get("min_budget")
     budget_max = prefs.get("max_budget") or mem.get("budget_max") or mem.get("budget")
+
+    # Follow-up state (best-effort)
+    followup_step = ""
+    try:
+        from core.followup import get_followup_state
+        fs = get_followup_state(uid)
+        # fs is a list of state dicts; surface the step of the most recent active entry
+        active = [s for s in (fs or []) if s.get("status") not in ("done", "skipped")]
+        if active:
+            followup_step = active[-1].get("step", "")
+        elif fs:
+            followup_step = fs[-1].get("step", "")
+    except Exception:
+        followup_step = mem.get("followup_step", "")
+
+    shortlisted = mem.get("properties_shortlisted") or []
 
     return {
         # Identity
@@ -573,7 +629,8 @@ def _lead_row(uid: str) -> dict:
         "session_count":    int(mem.get("session_count") or 0),
         # Engagement
         "viewed_count":      len(mem.get("properties_viewed") or []),
-        "shortlisted_count": len(mem.get("properties_shortlisted") or []),
+        "shortlisted_count": len(shortlisted),
+        "properties_shortlisted": shortlisted,
         "visits_count":      len(mem.get("visits_scheduled") or []),
         # Intent signals
         "deal_breakers":    mem.get("deal_breakers") or [],
@@ -590,6 +647,10 @@ def _lead_row(uid: str) -> dict:
         "sharing_types":    prefs.get("sharing_types_enabled") or [],
         # Cost
         "cost_inr":         round(float(cost.get("cost_usd") or 0.0) * 95, 2),
+        # Move-in intent
+        "move_in_date":     mem.get("move_in_date") or "",
+        # Follow-up state machine
+        "followup_step":    followup_step,
         # Outcome (Sprint 3)
         "lead_outcome":     mem.get("lead_outcome") or "",
         "outcome_notes":    mem.get("outcome_notes") or "",
@@ -612,9 +673,9 @@ async def admin_leads(
     """Return paginated, filterable lead list sorted by recency."""
     cutoff_ts = _time.time() - (days_since_active * 86400) if days_since_active else 0
 
-    # Pull a larger batch from the brand's sorted set so we can filter in Python
-    batch_size = max(limit * 4, 200)
-    uids = get_brand_active_users(brand_hash, offset=0, limit=batch_size)
+    # Fetch all brand UIDs so filters don't silently drop users outside an artificial ceiling
+    total_brand_count = get_brand_active_users_count(brand_hash)
+    uids = get_brand_active_users(brand_hash, offset=0, limit=total_brand_count) if total_brand_count else []
 
     rows = []
     for uid in uids:
@@ -789,6 +850,173 @@ async def admin_set_flags(request: Request, brand_hash: str = Depends(require_ad
 
 
 # ---------------------------------------------------------------------------
+# Model routing — per-brand LLM overrides (bake-off / A/B switching)
+# ---------------------------------------------------------------------------
+
+_ROUTABLE_AGENTS = ("broker", "booking", "profile", "default")
+
+
+@router.get("/admin/model-routing")
+async def admin_get_model_routing(brand_hash: str = Depends(require_admin_brand_key)):
+    """Return active model overrides for this brand (brand-scoped → global → none)."""
+    from db.redis.brand import get_model_override
+    result = {}
+    for agent in _ROUTABLE_AGENTS:
+        brand_override = get_model_override(agent, brand_hash)
+        global_override = get_model_override(agent, None)
+        result[agent] = {
+            "brand_override": brand_override,
+            "global_override": global_override,
+            "active": brand_override or global_override,
+        }
+    return {
+        "agents": result,
+        "routable": list(_ROUTABLE_AGENTS),
+        "openrouter_configured": bool(settings.OPENROUTER_API_KEY),  # never the key itself
+    }
+
+
+@router.post("/admin/model-routing")
+async def admin_set_model_routing(request: Request, brand_hash: str = Depends(require_admin_brand_key)):
+    """Set or clear a per-brand model override.
+
+    Body: { "agent": "broker", "model": "openrouter/google/gemini-pro-1.5-flash" }
+    To clear: { "agent": "broker", "model": null }
+
+    Supervisor is always Anthropic and cannot be overridden.
+    """
+    from db.redis.brand import set_model_override, clear_model_override, get_model_override
+    body = await request.json()
+    agent = body.get("agent", "").strip()
+    model = body.get("model")  # None → clear
+
+    if agent not in _ROUTABLE_AGENTS:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"agent must be one of: {', '.join(_ROUTABLE_AGENTS)}")
+
+    if model:
+        set_model_override(agent, str(model), brand_hash)
+        logger.info("model override set: agent=%s brand=%s model=%s", agent, brand_hash, model)
+    else:
+        clear_model_override(agent, brand_hash)
+        logger.info("model override cleared: agent=%s brand=%s", agent, brand_hash)
+
+    active = get_model_override(agent, brand_hash) or get_model_override(agent, None)
+    return {"ok": True, "agent": agent, "active": active}
+
+
+# ---------------------------------------------------------------------------
+# Admin login (ID + password → brand API key). No auth dependency — this IS
+# the gate. Credentials validated server-side; the raw key never ships in the
+# frontend bundle. See core/admin_login.py.
+# ---------------------------------------------------------------------------
+
+def _client_ip(request: Request) -> str:
+    """Real client IP for rate-limiting. Thin adapter over core.accounts.trusted_client_ip.
+
+    This service runs on Render (single trusted proxy), which appends the real
+    client IP as the LAST X-Forwarded-For hop. Leading hops are client-forgeable,
+    so the resolver takes the last hop, never the first. (Azure is RentOk's stack,
+    not this prototype's — there is no X-Azure-ClientIP here.)
+    """
+    from core.accounts import trusted_client_ip
+    peer = request.client.host if request.client else None
+    return trusted_client_ip(request.headers.get("X-Forwarded-For"), peer)
+
+
+@router.post("/admin/login")
+async def admin_login(request: Request):
+    from core.admin_login import (
+        verify_admin_login, is_throttled, _record_failure, _clear_failures,
+    )
+    from core.accounts import (
+        verify_login, login_ip_throttled, record_login_ip_failure, clear_login_ip_failures,
+    )
+
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="username and password are required")
+
+    # Two throttles: per-username (targeted guessing) AND per-IP (credential
+    # stuffing that rotates the email so the username counter never trips).
+    ip = _client_ip(request)
+    if is_throttled(username) or login_ip_throttled(ip):
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again later.")
+
+    # Self-serve accounts first (username == email). Only fall back to the legacy
+    # env credential when the account is genuinely not found / wrong password
+    # ("invalid") — a correct account whose brand is mis-provisioned must surface
+    # as "misconfigured", not be masked behind the legacy 401.
+    api_key, reason = verify_login(username, password)
+    consulted_legacy = False
+    if reason == "invalid":
+        consulted_legacy = True
+        api_key, reason = verify_admin_login(username, password)
+
+    if reason == "ok":
+        _clear_failures(username)
+        clear_login_ip_failures(ip)
+        return {"api_key": api_key}
+    if reason == "unconfigured":
+        raise HTTPException(status_code=503, detail="Admin login is not configured")
+    if reason == "throttled":
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again later.")
+    if reason == "misconfigured":
+        raise HTTPException(status_code=503, detail="Admin login misconfigured")
+    # legacy verify_admin_login records its own per-username failure; only count the
+    # account path there. The per-IP counter is recorded for every failure.
+    if not consulted_legacy:
+        _record_failure(username)
+    record_login_ip_failure(ip)
+    raise HTTPException(status_code=401, detail="Invalid username or password")
+
+
+@router.post("/admin/signup")
+async def admin_signup(request: Request):
+    from core.accounts import signup, send_verification_email, check_signup_rate
+
+    client_ip = _client_ip(request)
+    if not check_signup_rate(client_ip):
+        raise HTTPException(status_code=429, detail="Too many signups from this network. Try again later.")
+
+    body = await request.json()
+    email = (body.get("email") or "").strip()
+    password = body.get("password") or ""
+    brand_name = (body.get("brand_name") or "").strip()
+
+    result, reason = signup(email, password, brand_name)
+    if reason == "ok":
+        send_verification_email(result["email"], result["verify_token"])
+        # Return the api_key so the panel logs straight into the demo.
+        return {
+            "status": 200,
+            "api_key": result["api_key"],
+            "brand_link_token": result["brand_link_token"],
+            "email_verified": False,
+        }
+    if reason == "exists":
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    if reason.startswith("invalid:"):
+        raise HTTPException(status_code=400, detail=reason.split("invalid:", 1)[1])
+    raise HTTPException(status_code=400, detail="Signup failed.")
+
+
+@router.post("/admin/verify-email")
+async def admin_verify_email(request: Request):
+    from core.accounts import verify_email
+
+    body = await request.json()
+    token = (body.get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="token is required")
+    if verify_email(token):
+        return {"status": 200, "verified": True}
+    raise HTTPException(status_code=400, detail="Invalid or expired verification link.")
+
+
+# ---------------------------------------------------------------------------
 # Brand configuration (multi-tenant white-label)
 # ---------------------------------------------------------------------------
 
@@ -886,6 +1114,8 @@ async def admin_list_properties(brand_hash: str = Depends(require_admin_brand_ke
     except Exception as e:
         logger.warning("admin_list_properties cache read: %s", e)
 
+    doc_counts = await pg.get_property_doc_counts(brand_pg_ids)
+
     # Always return all brand pg_ids; use cache for enrichment
     props = []
     for pid in brand_pg_ids:
@@ -894,6 +1124,7 @@ async def admin_list_properties(brand_hash: str = Depends(require_admin_brand_ke
             "prop_id": pid,
             "name": info.get("pg_name") or info.get("name") or f"Property …{pid[-6:]}",
             "area": info.get("area") or info.get("location") or "",
+            "doc_count": doc_counts.get(pid, 0),
         })
     return {"properties": props}
 
@@ -902,7 +1133,7 @@ def _require_property_ownership(prop_id: str, brand_hash: str) -> None:
     """Raise 403 if prop_id is not in the brand's pg_ids list."""
     brand_cfg = get_brand_config_by_hash(brand_hash) or {}
     brand_pg_ids = brand_cfg.get("pg_ids", [])
-    if brand_pg_ids and prop_id not in brand_pg_ids:
+    if prop_id not in brand_pg_ids:
         raise HTTPException(status_code=403, detail="Property not in your brand")
 
 
@@ -1115,3 +1346,64 @@ async def admin_errors(
         "offset": offset,
         "limit": limit,
     }
+
+
+# ---------------------------------------------------------------------------
+# Eval health — CI stress-test results
+# ---------------------------------------------------------------------------
+
+class EvalRunRequest(BaseModel):
+    run_at: str
+    passed: int
+    warned: int
+    failed: int
+    total: int
+    scenarios: list[dict] | None = None
+    trigger: str | None = None
+    commit: str | None = None
+
+
+@router.get("/admin/eval-health")
+async def admin_get_eval_health(brand_hash: str = Depends(require_admin_brand_key)):
+    """Return the last stored eval run and history (last 10 runs)."""
+    from db.redis.eval import get_eval_last_run, get_eval_history
+    return {"last_run": get_eval_last_run(brand_hash), "history": get_eval_history(brand_hash, limit=10)}
+
+
+@router.post("/admin/eval-health")
+async def admin_post_eval_health(
+    body: EvalRunRequest, brand_hash: str = Depends(require_admin_brand_key)
+):
+    """Record a new eval run result. Call this from CI after running stress_test_broker.py."""
+    from db.redis.eval import save_eval_run
+    save_eval_run(brand_hash, body.model_dump())
+    return {"ok": True}
+
+
+@router.post("/admin/backfill-message-brand-hash")
+async def admin_backfill_message_brand_hash(brand_hash: str = Depends(require_admin_brand_key)):
+    """One-time migration: stamp booking_messages rows that have NULL brand_hash with the
+    calling brand's hash.  Safe to call multiple times — only touches NULL rows.
+    """
+    if pg._pool is None:
+        raise HTTPException(status_code=503, detail="Database pool not available")
+    try:
+        null_before = await pg._pool.fetchval(
+            "SELECT COUNT(*) FROM booking_messages WHERE brand_hash IS NULL"
+        )
+        await pg._pool.execute(
+            "UPDATE booking_messages SET brand_hash = $1 WHERE brand_hash IS NULL",
+            brand_hash,
+        )
+        null_after = await pg._pool.fetchval(
+            "SELECT COUNT(*) FROM booking_messages WHERE brand_hash IS NULL"
+        )
+        return {
+            "ok": True,
+            "updated": null_before - null_after,
+            "null_remaining": null_after,
+            "brand_hash": brand_hash,
+        }
+    except Exception as exc:
+        logger.error("backfill-message-brand-hash failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
