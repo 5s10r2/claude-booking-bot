@@ -33,24 +33,27 @@ logger = get_logger("main")
 # Brand auto-seeding — ensures known brands have configs on first startup
 # ---------------------------------------------------------------------------
 
+_OXOTEL_BRAND = {
+    "brand_name": "OxOtel",
+    "pg_ids": [
+        "l5zf3ckOnRQV9OHdv5YTTXkvLHp1",
+        "egu5HmrYFMP8MRJyMsefnpaL7ka2",
+        "Z2wyLOXXp5QA596DQ6aZAQpakmQ2",
+        "UaDCGP3dzzZRgVIzBDgXb5ry5ng2",
+        "EqhTMiUNksgXh5QhGQRsY5DQiO42",
+        "fzDBxYtHgVV21ertfkUdSHeomiv2",
+        "CUxtdeaGxYS8IMXmGZ1yUnqyfOn2",
+        "wtlUSKV9H8bkNqvlGmnogwoqwyk2",
+        "1Dy0t6YeIHh3kQhqvQR8tssHWKt1",
+        "U2uYCaeiCebrE95iUDsS4PwEd1J2",
+    ],
+    "cities": "Mumbai",
+    "areas": "Andheri, Kurla, Powai",
+}
+
 _SEED_BRANDS = {
-    "OxOtel1234": {
-        "brand_name": "OxOtel",
-        "pg_ids": [
-            "l5zf3ckOnRQV9OHdv5YTTXkvLHp1",
-            "egu5HmrYFMP8MRJyMsefnpaL7ka2",
-            "Z2wyLOXXp5QA596DQ6aZAQpakmQ2",
-            "UaDCGP3dzzZRgVIzBDgXb5ry5ng2",
-            "EqhTMiUNksgXh5QhGQRsY5DQiO42",
-            "fzDBxYtHgVV21ertfkUdSHeomiv2",
-            "CUxtdeaGxYS8IMXmGZ1yUnqyfOn2",
-            "wtlUSKV9H8bkNqvlGmnogwoqwyk2",
-            "1Dy0t6YeIHh3kQhqvQR8tssHWKt1",
-            "U2uYCaeiCebrE95iUDsS4PwEd1J2",
-        ],
-        "cities": "Mumbai",
-        "areas": "Andheri, Kurla, Powai",
-    },
+    "123456": {**_OXOTEL_BRAND},  # local dev admin key
+    "OxOtel1234": {**_OXOTEL_BRAND},
     # Add more brands here when their pg_ids are available:
     # "Stanza1234": { "brand_name": "Stanza", "pg_ids": [...], "cities": "Bangalore", ... },
 }
