@@ -8,9 +8,12 @@ from datetime import datetime
 
 import httpx
 
+from config import settings
 from core.log import get_logger
 
 logger = get_logger("channels.whatsapp")
+
+_INTERAKT_BASE = settings.INTERAKT_BASE_URL.rstrip("/")
 
 from db.redis_store import (
     get_account_values,
@@ -48,7 +51,7 @@ def _get_whatsapp_config(user_id: str) -> dict:
             "x-access-token": access_token,
             "Content-Type": "application/json",
         }
-        base_url = f"https://amped-express.interakt.ai/api/v17.0/{phone_number_id}/messages"
+        base_url = f"{_INTERAKT_BASE}/{phone_number_id}/messages"
 
     return {
         "url": base_url,

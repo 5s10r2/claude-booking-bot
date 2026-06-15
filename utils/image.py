@@ -7,6 +7,7 @@ from typing import Optional
 
 import httpx
 
+from config import settings
 from core.log import get_logger
 
 logger = get_logger("utils.image")
@@ -82,7 +83,7 @@ async def upload_media_from_url(
     if is_meta:
         upload_url = f"https://graph.facebook.com/v19.0/{phone_number_id}/media"
     else:
-        upload_url = f"https://amped-express.interakt.ai/api/v17.0/{phone_number_id}/media"
+        upload_url = f"{settings.INTERAKT_BASE_URL.rstrip('/')}/{phone_number_id}/media"
 
     try:
         upload_headers = dict(headers)

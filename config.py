@@ -31,9 +31,13 @@ class Settings(BaseSettings):
     LLM_REQUEST_TIMEOUT: float = 120.0
     LLM_CLASSIFY_TIMEOUT: float = 30.0
 
-    # WhatsApp (defaults from env, not hardcoded tokens)
-    WHATSAPP_ACCESS_TOKEN: Optional[str] = None
+    # WhatsApp webhook (verify token + Meta app secret for inbound HMAC)
+    WHATSAPP_ACCESS_TOKEN: Optional[str] = None  # legacy; outbound uses brand_config whatsapp_access_token
     WHATSAPP_VERIFY_TOKEN: str = "booking-bot-verify"
+
+    # Interakt outbound API (token also stored per-brand in Redis brand_config)
+    INTERAKT_ACCESS_TOKEN: Optional[str] = None
+    INTERAKT_BASE_URL: str = "https://amped-express.interakt.ai/api/v17.0"
 
     # Webhook payload authenticity (HMAC-SHA256 over the RAW request body).
     # WHATSAPP_APP_SECRET: Meta app secret — when set, POST /webhook/whatsapp requires a
