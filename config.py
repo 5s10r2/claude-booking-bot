@@ -72,6 +72,10 @@ class Settings(BaseSettings):
         "openrouter/z-ai/glm-4.6:exacto":   {"in": 0.55,  "out": 2.20},
     }
 
+    # USD→INR conversion rate — single source of truth for all admin cost display.
+    # Override via USD_INR_RATE env var when the rate drifts; no code change needed.
+    USD_INR_RATE: float = 95
+
     # API auth (set in .env; if empty, auth is disabled)
     API_KEY: Optional[str] = None
 
